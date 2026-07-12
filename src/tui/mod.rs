@@ -15,7 +15,7 @@ use crossterm::terminal::{
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 use reqwest::Client;
 
@@ -96,11 +96,6 @@ fn paint_list_base(theme: &Theme) -> Style {
     Style::reset().fg(theme.text).bg(theme.bg)
 }
 
-/// No-op highlight: selection is drawn inside each ListItem so colors stay stable.
-fn paint_list_highlight_noop() -> Style {
-    Style::new()
-}
-
 fn key_line(theme: &Theme, hints: &[KeyHint]) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, h) in hints.iter().enumerate() {
@@ -129,12 +124,15 @@ struct App {
     search: String,
     searching: bool,
     module_list: Vec<String>,
-    module_state: ListState,
+    module_sel: usize,
+    module_offset: usize,
     fn_list: Vec<usize>,
-    fn_state: ListState,
+    fn_sel: usize,
+    fn_offset: usize,
     priority_mode: PriorityMode,
     priority_list: Vec<usize>,
-    priority_state: ListState,
+    priority_sel: usize,
+    priority_offset: usize,
     selected_id: Option<String>,
     detail: Option<FunctionDetail>,
     batch: Vec<String>,
@@ -167,12 +165,15 @@ impl App {
             search: String::new(),
             searching: false,
             module_list: Vec::new(),
-            module_state: ListState::default(),
+            module_sel: 0,
+            module_offset: 0,
             fn_list: Vec::new(),
-            fn_state: ListState::default(),
+            fn_sel: 0,
+            fn_offset: 0,
             priority_mode: PriorityMode::Nearly,
             priority_list: Vec::new(),
-            priority_state: ListState::default(),
+            priority_sel: 0,
+            priority_offset: 0,
             selected_id: None,
             detail: None,
             batch: Vec::new(),
@@ -439,18 +440,64 @@ Press ? or esc to close help."#
         mods.sort();
         mods.dedup();
         self.module_list = mods;
-        if !self.module_list.is_empty() {
-            self.module_state.select(Some(0));
-        } else {
-            self.module_state.select(None);
-        }
+        self.module_sel = 0;
+        self.module_offset = 0;
     }
 
     fn selected_module(&self) -> Option<&str> {
-        self.module_state
-            .selected()
-            .and_then(|i| self.module_list.get(i))
-            .map(String::as_str)
+        self.module_list.get(self.module_sel).map(String::as_str)
+    }
+
+    /// Keep `sel` visible inside a viewport of `height` rows starting at `offset`.
+    fn clamp_scroll(sel: usize, offset: &mut usize, len: usize, height: usize) {
+        if len == 0 || height == 0 {
+            *offset = 0;
+            return;
+        }
+        let sel = sel.min(len - 1);
+        if sel < *offset {
+            *offset = sel;
+        } else if sel >= *offset + height {
+            *offset = sel + 1 - height;
+        }
+        let max_off = len.saturating_sub(height);
+        if *offset > max_off {
+            *offset = max_off;
+        }
+    }
+
+    /// Draw a bordered pane of pre-built lines with manual scrolling (no List widget).
+    fn draw_line_list(
+        f: &mut Frame,
+        area: Rect,
+        title: String,
+        theme: &Theme,
+        lines: &[Line<'static>],
+        offset: usize,
+    ) {
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(paint_on(theme.border, theme.bg))
+            .style(paint_list_base(theme));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        // Wipe the pane so no stale SGR/cells linger under shorter rows.
+        f.render_widget(Clear, inner);
+        f.render_widget(
+            Block::default().style(paint_list_base(theme)),
+            inner,
+        );
+
+        let height = inner.height as usize;
+        let buf = f.buffer_mut();
+        for row in 0..height {
+            let idx = offset + row;
+            let y = inner.y + row as u16;
+            if let Some(line) = lines.get(idx) {
+                buf.set_line(inner.x, y, line, inner.width);
+            }
+        }
     }
 
     fn rebuild_functions(&mut self) {
@@ -473,12 +520,9 @@ Press ? or esc to close help."#
             })
             .map(|(i, _)| i)
             .collect();
-        if self.fn_list.is_empty() {
-            self.fn_state.select(None);
-        } else {
-            self.fn_state.select(Some(0));
-            self.sync_selection_from_fn();
-        }
+        self.fn_sel = 0;
+        self.fn_offset = 0;
+        self.sync_selection_from_fn();
     }
 
     fn rebuild_priorities(&mut self) {
@@ -491,19 +535,14 @@ Press ? or esc to close help."#
             .into_iter()
             .filter_map(|f| db.functions.iter().position(|x| x.id == f.id))
             .collect();
-        if self.priority_list.is_empty() {
-            self.priority_state.select(None);
-        } else {
-            self.priority_state.select(Some(0));
-        }
+        self.priority_sel = 0;
+        self.priority_offset = 0;
     }
 
     fn sync_selection_from_fn(&mut self) {
         let Some(db) = &self.db else { return };
-        if let Some(sel) = self.fn_state.selected() {
-            if let Some(&idx) = self.fn_list.get(sel) {
-                self.selected_id = Some(db.functions[idx].id.clone());
-            }
+        if let Some(&idx) = self.fn_list.get(self.fn_sel) {
+            self.selected_id = Some(db.functions[idx].id.clone());
         }
     }
 
@@ -792,14 +831,12 @@ Press ? or esc to close help."#
             }
             KeyCode::Enter => {
                 if self.screen == Screen::Priorities {
-                    if let Some(sel) = self.priority_state.selected() {
-                        if let Some(&idx) = self.priority_list.get(sel) {
-                            if let Some(db) = &self.db {
-                                self.selected_id = Some(db.functions[idx].id.clone());
-                                self.screen = Screen::Detail;
-                                self.load_selected_detail().await;
-                                self.status = "Opened from priorities".into();
-                            }
+                    if let Some(&idx) = self.priority_list.get(self.priority_sel) {
+                        if let Some(db) = &self.db {
+                            self.selected_id = Some(db.functions[idx].id.clone());
+                            self.screen = Screen::Detail;
+                            self.load_selected_detail().await;
+                            self.status = "Opened from priorities".into();
                         }
                     }
                 } else if self.screen == Screen::Overview {
@@ -864,10 +901,10 @@ Press ? or esc to close help."#
         if self.module_list.is_empty() {
             return;
         }
-        let i = self.module_state.selected().unwrap_or(0) as isize + delta;
         let n = self.module_list.len() as isize;
+        let i = self.module_sel as isize + delta;
         let i = ((i % n) + n) % n;
-        self.module_state.select(Some(i as usize));
+        self.module_sel = i as usize;
     }
 
     async fn move_sel(&mut self, delta: isize) {
@@ -876,20 +913,20 @@ Press ? or esc to close help."#
                 if self.fn_list.is_empty() {
                     return;
                 }
-                let i = self.fn_state.selected().unwrap_or(0) as isize + delta;
                 let n = self.fn_list.len() as isize;
+                let i = self.fn_sel as isize + delta;
                 let i = ((i % n) + n) % n;
-                self.fn_state.select(Some(i as usize));
+                self.fn_sel = i as usize;
                 self.sync_selection_from_fn();
             }
             Screen::Priorities => {
                 if self.priority_list.is_empty() {
                     return;
                 }
-                let i = self.priority_state.selected().unwrap_or(0) as isize + delta;
                 let n = self.priority_list.len() as isize;
+                let i = self.priority_sel as isize + delta;
                 let i = ((i % n) + n) % n;
-                self.priority_state.select(Some(i as usize));
+                self.priority_sel = i as usize;
             }
             Screen::Prompt => {
                 if delta < 0 {
@@ -1115,8 +1152,15 @@ Press ? or esc to close help."#
             .constraints([Constraint::Percentage(28), Constraint::Percentage(72)])
             .split(area);
 
-        let mod_sel = self.module_state.selected();
-        let mod_items: Vec<ListItem> = self
+        // Module lines
+        let mod_height = cols[0].height.saturating_sub(2) as usize;
+        Self::clamp_scroll(
+            self.module_sel,
+            &mut self.module_offset,
+            self.module_list.len(),
+            mod_height,
+        );
+        let mod_lines: Vec<Line<'static>> = self
             .module_list
             .iter()
             .enumerate()
@@ -1127,7 +1171,7 @@ Press ? or esc to close help."#
                     .iter()
                     .filter(|f| f.module == *m && f.matched)
                     .count();
-                let selected = mod_sel == Some(i);
+                let selected = i == self.module_sel;
                 let bg = if selected {
                     self.theme.panel
                 } else {
@@ -1144,34 +1188,36 @@ Press ? or esc to close help."#
                 } else {
                     paint_on(fg, bg)
                 };
-                ListItem::new(Line::from(Span::styled(
+                Line::from(Span::styled(
                     format!("{mark}{m}  {matched}/{total}"),
                     style,
-                )))
-                .style(paint_on(self.theme.text, bg))
+                ))
             })
             .collect();
-        let mods = List::new(mod_items)
-            .block(
-                Block::default()
-                    .title(" Modules  (h/l) ")
-                    .borders(Borders::ALL)
-                    .border_style(paint_on(self.theme.border, self.theme.bg))
-                    .style(paint_list_base(&self.theme)),
-            )
-            .style(paint_list_base(&self.theme))
-            .highlight_style(paint_list_highlight_noop())
-            .highlight_symbol("");
-        f.render_stateful_widget(mods, cols[0], &mut self.module_state);
+        Self::draw_line_list(
+            f,
+            cols[0],
+            " Modules  (h/l) ".into(),
+            &self.theme,
+            &mod_lines,
+            self.module_offset,
+        );
 
-        let fn_sel = self.fn_state.selected();
-        let fn_items: Vec<ListItem> = self
+        // Function lines
+        let fn_height = cols[1].height.saturating_sub(2) as usize;
+        Self::clamp_scroll(
+            self.fn_sel,
+            &mut self.fn_offset,
+            self.fn_list.len(),
+            fn_height,
+        );
+        let fn_lines: Vec<Line<'static>> = self
             .fn_list
             .iter()
             .enumerate()
             .map(|(list_i, &idx)| {
                 let f = &db.functions[idx];
-                let selected = fn_sel == Some(list_i);
+                let selected = list_i == self.fn_sel;
                 let bg = if selected {
                     self.theme.panel
                 } else {
@@ -1218,7 +1264,7 @@ Press ? or esc to close help."#
                     format!("{}  0x{:x}  {}B", f.name, f.addr, f.size),
                     name_style,
                 ));
-                ListItem::new(Line::from(spans)).style(paint_on(self.theme.text, bg))
+                Line::from(spans)
             })
             .collect();
         let batched_visible = self
@@ -1241,18 +1287,14 @@ Press ? or esc to close help."#
                 self.batch_summary()
             )
         };
-        let fns = List::new(fn_items)
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(paint_on(self.theme.border, self.theme.bg))
-                    .style(paint_list_base(&self.theme)),
-            )
-            .style(paint_list_base(&self.theme))
-            .highlight_style(paint_list_highlight_noop())
-            .highlight_symbol("");
-        f.render_stateful_widget(fns, cols[1], &mut self.fn_state);
+        Self::draw_line_list(
+            f,
+            cols[1],
+            title,
+            &self.theme,
+            &fn_lines,
+            self.fn_offset,
+        );
     }
 
     fn draw_priorities(&mut self, f: &mut Frame, area: Rect) {
@@ -1263,14 +1305,20 @@ Press ? or esc to close help."#
             self.priority_list.len(),
             self.batch_summary()
         );
-        let pri_sel = self.priority_state.selected();
-        let items: Vec<ListItem> = self
+        let height = area.height.saturating_sub(2) as usize;
+        Self::clamp_scroll(
+            self.priority_sel,
+            &mut self.priority_offset,
+            self.priority_list.len(),
+            height,
+        );
+        let lines: Vec<Line<'static>> = self
             .priority_list
             .iter()
             .enumerate()
             .map(|(list_i, &idx)| {
                 let f = &db.functions[idx];
-                let selected = pri_sel == Some(list_i);
+                let selected = list_i == self.priority_sel;
                 let bg = if selected {
                     self.theme.panel
                 } else {
@@ -1304,21 +1352,17 @@ Press ? or esc to close help."#
                     format!("{}  {}  0x{:x}  {extra}", f.module, f.name, f.addr),
                     name_style,
                 ));
-                ListItem::new(Line::from(spans)).style(paint_on(self.theme.text, bg))
+                Line::from(spans)
             })
             .collect();
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(paint_on(self.theme.border, self.theme.bg))
-                    .style(paint_list_base(&self.theme)),
-            )
-            .style(paint_list_base(&self.theme))
-            .highlight_style(paint_list_highlight_noop())
-            .highlight_symbol("");
-        f.render_stateful_widget(list, area, &mut self.priority_state);
+        Self::draw_line_list(
+            f,
+            area,
+            title,
+            &self.theme,
+            &lines,
+            self.priority_offset,
+        );
     }
 
     fn draw_detail(&self, f: &mut Frame, area: Rect) {
