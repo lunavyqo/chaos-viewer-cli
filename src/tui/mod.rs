@@ -2503,23 +2503,13 @@ Add functions with b on Overview or Priorities \
                 } else {
                     paint_on(fg, bg)
                 };
-                // Unmatched filter: remaining open work (fully matched modules are already hidden).
-                let counts = match self.match_filter {
-                    MatchFilter::UnmatchedOnly => {
-                        let open = total.saturating_sub(matched);
-                        format!("{open}/{total} open")
-                    }
-                    MatchFilter::MatchedOnly | MatchFilter::All => {
-                        format!("{matched}/{total}")
-                    }
-                };
+                let counts = format!("{matched}/{total}");
                 Line::from(Span::styled(format!("{mark}{m}  {counts}"), style))
             })
             .collect();
         let mod_title = match self.match_filter {
-            MatchFilter::UnmatchedOnly => " Modules  (have open · h/l) ",
             MatchFilter::MatchedOnly => " Modules  (have matches · h/l) ",
-            MatchFilter::All => " Modules  (h/l) ",
+            MatchFilter::All | MatchFilter::UnmatchedOnly => " Modules  (h/l) ",
         };
         Self::draw_line_list(
             f,
