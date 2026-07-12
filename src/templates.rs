@@ -30,6 +30,9 @@ pub struct UserConfig {
     /// Template id used when none is selected explicitly.
     #[serde(default = "default_template_id")]
     pub default_template: String,
+    /// Last / preferred project profile id (`projects.toml`).
+    #[serde(default)]
+    pub active_project: Option<String>,
 }
 
 fn default_template_id() -> String {
@@ -244,14 +247,14 @@ pub fn chaos_home() -> PathBuf {
     PathBuf::from(home).join(".config").join("chaos")
 }
 
-fn load_user_config(path: &Path) -> UserConfig {
+pub fn load_user_config(path: &Path) -> UserConfig {
     match fs::read_to_string(path) {
         Ok(text) => toml::from_str(&text).unwrap_or_default(),
         Err(_) => UserConfig::default(),
     }
 }
 
-fn save_user_config(path: &Path, cfg: &UserConfig) -> Result<()> {
+pub fn save_user_config(path: &Path, cfg: &UserConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

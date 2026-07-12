@@ -25,6 +25,7 @@ use crate::load::{
     details_base_from_source, load_chaos_db, load_function_detail, DataSource, DetailCache,
 };
 use crate::prioritize::{priority_rows, PriorityMode};
+use crate::projects::{ProjectProfile, ProjectStore};
 use crate::prompt::{batch_max, PromptOptions};
 use crate::schema::{format_pct, ChaosDb, ChaosFunction, FunctionDetail, ProjectConfig};
 use crate::templates::TemplateStore;
@@ -187,6 +188,14 @@ struct App {
     theme: Theme,
     screen: Screen,
     setup_input: String,
+    /// Saved multi-repo profiles.
+    project_store: ProjectStore,
+    project_sel: usize,
+    /// Setup: true = project list focused, false = freeform source input.
+    setup_list_focus: bool,
+    /// Saving a new profile: type id then Enter.
+    saving_project: bool,
+    project_id_input: String,
     status: String,
     error: Option<String>,
     db: Option<ChaosDb>,
@@ -245,11 +254,23 @@ impl App {
             .user_agent("chaos-viewer-cli/0.1")
             .timeout(Duration::from_secs(30))
             .build()?;
+        let project_store = ProjectStore::load();
+        let project_sel = project_store
+            .active_id
+            .as_ref()
+            .and_then(|id| project_store.index_of(id))
+            .unwrap_or(0);
         let mut app = Self {
             theme: Theme::default(),
             screen: Screen::Setup,
             setup_input: String::new(),
-            status: "Enter a path, JSON URL, or GitHub repo URL, then press Enter".into(),
+            project_store,
+            project_sel,
+            setup_list_focus: true,
+            saving_project: false,
+            project_id_input: String::new(),
+            status: "Select a saved project or type a path/URL · enter load · s save · p later"
+                .into(),
             error: None,
             db: None,
             source: None,
@@ -297,14 +318,42 @@ impl App {
 
     fn global_hints(&self) -> Vec<KeyHint> {
         if self.screen == Screen::Setup {
+            if self.saving_project {
+                return vec![
+                    KeyHint {
+                        key: "type",
+                        action: "project id",
+                    },
+                    KeyHint {
+                        key: "enter",
+                        action: "save",
+                    },
+                    KeyHint {
+                        key: "esc",
+                        action: "cancel",
+                    },
+                ];
+            }
             return vec![
+                KeyHint {
+                    key: "j/k",
+                    action: "projects",
+                },
+                KeyHint {
+                    key: "tab",
+                    action: "list/input",
+                },
                 KeyHint {
                     key: "enter",
                     action: "load",
                 },
                 KeyHint {
-                    key: "?",
-                    action: "help",
+                    key: "s",
+                    action: "save profile",
+                },
+                KeyHint {
+                    key: "d",
+                    action: "delete",
                 },
                 KeyHint {
                     key: "q",
@@ -348,6 +397,10 @@ impl App {
             KeyHint {
                 key: "tab/1-5",
                 action: "screens",
+            },
+            KeyHint {
+                key: "p",
+                action: "projects",
             },
             KeyHint {
                 key: "u",
@@ -456,6 +509,7 @@ GLOBAL
   q           quit
   tab / S-tab next / previous screen
   1 2 3 4 5   Overview · Heatmap · Priorities · Prompt · Claims
+  p           projects hub (switch / add / remove saved repos)
   u           update progress (re-fetch chaos-db; matches can land mid-session)
   r           refresh claims only
   c           copy batch prompt to clipboard (no-op if batch empty)
@@ -488,15 +542,24 @@ PROMPT
   Shift+t     set current template as default
   c           copy batch prompt
 
-SETUP
-  type path, raw JSON URL, or GitHub repo URL
-  enter       load atlas
+SETUP / PROJECTS
+  j / k       select saved project
+  tab         focus project list ↔ source input
+  enter       load selected project, or freeform source if input focused
+  s           save source line as a named project (then type id)
+  d           delete selected saved project
+  p           open this hub from any loaded screen
+  type path, raw JSON URL, or GitHub repo in the input line
 
 Press ? or esc to close help."#
             .to_string()
     }
 
     async fn load_from(&mut self, input: &str) -> Result<()> {
+        self.load_from_with_branch(input, None).await
+    }
+
+    async fn load_from_with_branch(&mut self, input: &str, branch: Option<&str>) -> Result<()> {
         self.status = format!("Loading {input}…");
         self.error = None;
         let input = input.trim();
@@ -504,15 +567,71 @@ Press ? or esc to close help."#
             && !input.contains("raw.githubusercontent.com")
             && !input.ends_with(".json")
         {
-            load_chaos_db(&self.client, None, Some(input), None).await?
+            load_chaos_db(&self.client, None, Some(input), branch).await?
         } else {
             load_chaos_db(&self.client, Some(input), None, None).await?
         };
         let base = details_base_from_source(&source);
         self.detail_cache = Some(DetailCache::new(base));
         self.source = Some(source);
+        // Switching repo clears batch / selection noise.
+        self.batch.clear();
+        self.selected_id = None;
+        self.detail = None;
+        self.invalidate_detail_lines();
         self.apply_db(db, true).await;
         Ok(())
+    }
+
+    async fn load_project_by_id(&mut self, id: &str) -> Result<()> {
+        let profile = self
+            .project_store
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown project '{id}'"))?;
+        self.setup_input = profile.source.clone();
+        self.load_from_with_branch(&profile.source, profile.branch.as_deref())
+            .await?;
+        self.project_store.set_active(Some(&profile.id))?;
+        if let Some(i) = self.project_store.index_of(&profile.id) {
+            self.project_sel = i;
+        }
+        self.status = format!("Loaded project {} ({})", profile.name, profile.id);
+        Ok(())
+    }
+
+    fn save_current_source_as_project(&mut self, id: &str) -> Result<()> {
+        let source = {
+            let typed = self.setup_input.trim();
+            if !typed.is_empty() {
+                typed.to_string()
+            } else if let Some(src) = self.source.as_ref().map(|s| s.display()) {
+                src
+            } else {
+                anyhow::bail!("nothing to save — type a path/URL or load a project first");
+            }
+        };
+        let id = crate::projects::sanitize_project_id(id)?;
+        let name = id.clone();
+        self.project_store.upsert(ProjectProfile {
+            id: id.clone(),
+            name,
+            source,
+            branch: None,
+        })?;
+        self.project_store.set_active(Some(&id))?;
+        self.project_sel = self.project_store.index_of(&id).unwrap_or(0);
+        Ok(())
+    }
+
+    fn active_project_label(&self) -> String {
+        self.project_store
+            .active_id
+            .as_ref()
+            .and_then(|id| self.project_store.get(id))
+            .map(|p| format!("{} ({})", p.name, p.id))
+            .or_else(|| self.source.as_ref().map(|s| s.display()))
+            .unwrap_or_else(|| "no project".into())
     }
 
     /// Re-fetch atlas data from the current source (local file or URL).
@@ -1295,27 +1414,136 @@ Add functions with b on Overview or Priorities \
         }
 
         if self.screen == Screen::Setup {
+            if self.saving_project {
+                match key {
+                    KeyCode::Esc => {
+                        self.saving_project = false;
+                        self.project_id_input.clear();
+                        self.status = "Save cancelled".into();
+                    }
+                    KeyCode::Enter => {
+                        let id = self.project_id_input.clone();
+                        self.saving_project = false;
+                        self.project_id_input.clear();
+                        match self.save_current_source_as_project(&id) {
+                            Ok(()) => {
+                                self.status = format!("Saved project profile '{id}'");
+                                self.error = None;
+                            }
+                            Err(e) => {
+                                self.error = Some(format!("{e:#}"));
+                                self.status = "Save failed".into();
+                            }
+                        }
+                    }
+                    KeyCode::Backspace | KeyCode::Delete => {
+                        self.project_id_input.pop();
+                    }
+                    KeyCode::Char(_) if !mods.contains(KeyModifiers::CONTROL) => {
+                        if let Some(c) = typed {
+                            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                                self.project_id_input.push(c);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
             match key {
                 KeyCode::Esc => {
-                    self.status = "Press q to quit · enter to load".into();
-                }
-                KeyCode::Enter => {
-                    let input = self.setup_input.clone();
-                    if input.trim().is_empty() {
-                        self.error = Some("Enter a path, URL, or GitHub repo".into());
-                    } else if let Err(e) = self.load_from(&input).await {
-                        self.error = Some(format!("{e:#}"));
-                        self.status = "Load failed".into();
+                    if self.db.is_some() {
+                        self.screen = Screen::Overview;
+                        self.status = "Overview".into();
                     } else {
-                        self.error = None;
+                        self.status = "q quit · enter load · s save project".into();
                     }
                 }
-                KeyCode::Backspace | KeyCode::Delete => {
+                KeyCode::Tab => {
+                    self.setup_list_focus = !self.setup_list_focus;
+                    self.status = if self.setup_list_focus {
+                        "Focus: project list (j/k enter)"
+                    } else {
+                        "Focus: source input (type · enter load · s save)"
+                    }
+                    .into();
+                }
+                KeyCode::Up | KeyCode::Char('k') if self.setup_list_focus => {
+                    if !self.project_store.projects.is_empty() {
+                        if self.project_sel == 0 {
+                            self.project_sel = self.project_store.projects.len() - 1;
+                        } else {
+                            self.project_sel -= 1;
+                        }
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') if self.setup_list_focus => {
+                    if !self.project_store.projects.is_empty() {
+                        self.project_sel =
+                            (self.project_sel + 1) % self.project_store.projects.len();
+                    }
+                }
+                KeyCode::Char('d') if self.setup_list_focus => {
+                    if let Some(p) = self.project_store.projects.get(self.project_sel).cloned() {
+                        match self.project_store.remove(&p.id) {
+                            Ok(true) => {
+                                self.project_sel = self
+                                    .project_sel
+                                    .min(self.project_store.projects.len().saturating_sub(1));
+                                self.status = format!("Removed project '{}'", p.id);
+                            }
+                            Ok(false) => self.status = "Nothing to remove".into(),
+                            Err(e) => self.error = Some(format!("{e:#}")),
+                        }
+                    }
+                }
+                KeyCode::Char('s') => {
+                    let suggest = if !self.setup_input.trim().is_empty() {
+                        ProjectStore::suggest_id(&self.setup_input)
+                    } else if let Some(src) = self.source.as_ref() {
+                        ProjectStore::suggest_id(&src.display())
+                    } else if let Some(p) = self.project_store.projects.get(self.project_sel) {
+                        p.id.clone()
+                    } else {
+                        "my-project".into()
+                    };
+                    self.saving_project = true;
+                    self.project_id_input = suggest;
+                    self.status =
+                        "Project id (letters/digits/-/_) · enter save · esc cancel".into();
+                }
+                KeyCode::Enter => {
+                    if self.setup_list_focus && !self.project_store.projects.is_empty() {
+                        if let Some(p) = self.project_store.projects.get(self.project_sel) {
+                            let id = p.id.clone();
+                            if let Err(e) = self.load_project_by_id(&id).await {
+                                self.error = Some(format!("{e:#}"));
+                                self.status = "Load failed".into();
+                            } else {
+                                self.error = None;
+                            }
+                        }
+                    } else {
+                        let input = self.setup_input.clone();
+                        if input.trim().is_empty() {
+                            self.error = Some("Enter a path, URL, or GitHub repo".into());
+                        } else if let Err(e) = self.load_from(&input).await {
+                            self.error = Some(format!("{e:#}"));
+                            self.status = "Load failed".into();
+                        } else {
+                            self.error = None;
+                            // Keep freeform load; user can s to save.
+                            self.status = "Loaded · press s to save as a named project".into();
+                        }
+                    }
+                }
+                KeyCode::Backspace | KeyCode::Delete if !self.setup_list_focus => {
                     self.setup_input.pop();
                 }
-                KeyCode::Char(_) if !mods.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char(_)
+                    if !self.setup_list_focus && !mods.contains(KeyModifiers::CONTROL) =>
+                {
                     if let Some(c) = typed {
-                        // Quit only when line is empty; otherwise allow typing q in URLs.
                         if matches!(c, 'q' | 'Q') && self.setup_input.is_empty() {
                             self.should_quit = true;
                         } else {
@@ -1324,6 +1552,9 @@ Add functions with b on Overview or Priorities \
                         }
                     }
                 }
+                KeyCode::Char('q') if self.setup_list_focus && self.setup_input.is_empty() => {
+                    self.should_quit = true;
+                }
                 _ => {}
             }
             return;
@@ -1331,6 +1562,18 @@ Add functions with b on Overview or Priorities \
 
         match key {
             KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('p') => {
+                self.screen = Screen::Setup;
+                self.setup_list_focus = true;
+                self.project_store.reload();
+                if let Some(id) = self.project_store.active_id.clone() {
+                    if let Some(i) = self.project_store.index_of(&id) {
+                        self.project_sel = i;
+                    }
+                }
+                self.status =
+                    "Projects · j/k select · enter load · s save · d delete · tab input".into();
+            }
             KeyCode::Esc => {
                 // Soft escape: clear error / go overview, do not quit
                 if self.error.take().is_some() {
@@ -1829,15 +2072,19 @@ Add functions with b on Overview or Priorities \
             } else {
                 format!("batch {} ★", self.batch_summary())
             };
+            let proj = self
+                .project_store
+                .active_id
+                .as_deref()
+                .unwrap_or(db.project_name());
             format!(
-                " chaos  ·  {}  ·  {}/{} fn ({}%)  ·  {batch_bit}  ·  gen {gen}",
-                db.project_name(),
+                " chaos  ·  {proj}  ·  {}/{} fn ({}%)  ·  {batch_bit}  ·  gen {gen}  ·  p projects",
                 db.stats.matched_functions,
                 db.stats.total_functions,
                 format_pct(db.stats.matched_functions, db.stats.total_functions),
             )
         } else {
-            " chaos  ·  Chaos Viewer CLI  ·  press ? for help".into()
+            " chaos  ·  Chaos Viewer CLI  ·  projects hub  ·  press ? for help".into()
         };
 
         let block = Block::default()
@@ -1974,23 +2221,106 @@ Add functions with b on Overview or Priorities \
 
     fn draw_setup(&self, f: &mut Frame, area: Rect) {
         let bg = self.theme.bg;
-        let block = content_block(" Setup ", &self.theme, self.theme.border);
+        let title = if self.saving_project {
+            format!(" Save project as: {}_ ", self.project_id_input)
+        } else {
+            format!(
+                " Projects  ·  active: {}  ·  p anytime ",
+                self.active_project_label()
+            )
+        };
+        let block = content_block(title, &self.theme, self.theme.border);
         let inner = block.inner(area);
         f.render_widget(block, area);
         fill_pane(f, inner, &self.theme, bg);
 
-        let body = format!(
-            "Point chaos at any decomp project that publishes chaos-db.json.\n\n\
-             Path, raw JSON URL, or GitHub repo:\n\n  > {}_\n\n\
-             Keys:  enter = load   ? = help   q = quit\n\n\
-             Examples:\n  ./data/chaos-db.json\n  https://raw.githubusercontent.com/org/repo/chaos-data/chaos-db.json\n  https://github.com/org/repo",
-            self.setup_input
-        );
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(5),
+                Constraint::Length(6),
+                Constraint::Length(4),
+            ])
+            .split(inner);
+
+        // Project list
+        let list_title = if self.setup_list_focus && !self.saving_project {
+            " Saved projects  [focused]  j/k enter d "
+        } else {
+            " Saved projects "
+        };
+        let list_block = content_block(list_title, &self.theme, self.theme.border);
+        let list_inner = list_block.inner(rows[0]);
+        f.render_widget(list_block, rows[0]);
+        fill_pane(f, list_inner, &self.theme, bg);
+
+        let mut list_lines: Vec<Line<'static>> = Vec::new();
+        if self.project_store.projects.is_empty() {
+            list_lines.push(Line::from(Span::styled(
+                "  (none yet — type a source below, enter to load, s to save)",
+                paint_on(self.theme.muted, bg),
+            )));
+        } else {
+            for (i, p) in self.project_store.projects.iter().enumerate() {
+                let selected = i == self.project_sel;
+                let active = self.project_store.active_id.as_deref() == Some(p.id.as_str());
+                let row_bg = if selected { self.theme.panel } else { bg };
+                let mark = if selected { "› " } else { "  " };
+                let star = if active { "★ " } else { "  " };
+                let style = if selected {
+                    paint_bold_on(self.theme.accent, row_bg)
+                } else {
+                    paint_on(self.theme.text, row_bg)
+                };
+                list_lines.push(Line::from(Span::styled(
+                    format!("{mark}{star}{:<16}  {}", p.id, p.source),
+                    style,
+                )));
+            }
+        }
+        let height = list_inner.height as usize;
+        let offset = self
+            .project_sel
+            .saturating_sub(height.saturating_sub(1))
+            .min(self.project_store.projects.len().saturating_sub(height));
+        for (row, line) in list_lines.iter().skip(offset).take(height).enumerate() {
+            f.buffer_mut().set_line(
+                list_inner.x,
+                list_inner.y + row as u16,
+                line,
+                list_inner.width,
+            );
+        }
+
+        // Source input
+        let input_title = if !self.setup_list_focus && !self.saving_project {
+            " Source  [focused]  path · URL · GitHub "
+        } else {
+            " Source  path · URL · GitHub "
+        };
+        let input_block = content_block(input_title, &self.theme, self.theme.border);
+        let input_inner = input_block.inner(rows[1]);
+        f.render_widget(input_block, rows[1]);
+        fill_pane(f, input_inner, &self.theme, bg);
+        let input_line = format!("> {}_", self.setup_input);
         f.render_widget(
-            Paragraph::new(body)
+            Paragraph::new(input_line)
                 .style(paint_on(self.theme.text, bg))
                 .wrap(Wrap { trim: false }),
-            inner,
+            input_inner,
+        );
+
+        // Help strip
+        let help = if self.saving_project {
+            "Enter id · enter save · esc cancel"
+        } else {
+            "j/k list · tab focus · enter load · s save profile · d delete · esc overview · q quit"
+        };
+        f.render_widget(
+            Paragraph::new(help)
+                .style(paint_on(self.theme.muted, bg))
+                .wrap(Wrap { trim: true }),
+            rows[2],
         );
     }
 
@@ -2401,11 +2731,18 @@ pub async fn run(
     input: Option<String>,
     repo: Option<String>,
     branch: Option<String>,
+    project: Option<String>,
 ) -> Result<()> {
     let claims_session = ClaimsSession::from_env();
     let mut app = App::new(claims_session)?;
 
-    if let Some(repo) = repo {
+    if let Some(project) = project {
+        if let Err(e) = app.load_project_by_id(&project).await {
+            // Fall through to setup with error if profile missing.
+            app.error = Some(format!("{e:#}"));
+            app.status = "Project load failed · pick another".into();
+        }
+    } else if let Some(repo) = repo {
         let (db, source) = load_chaos_db(&app.client, None, Some(&repo), branch.as_deref()).await?;
         let base = details_base_from_source(&source);
         app.detail_cache = Some(DetailCache::new(base));
@@ -2413,6 +2750,12 @@ pub async fn run(
         app.apply_db(db, true).await;
     } else if let Some(input) = input {
         app.load_from(&input).await?;
+    } else if let Some(id) = app.project_store.active_id.clone() {
+        // Resume last project silently; stay on Setup if it fails.
+        if let Err(e) = app.load_project_by_id(&id).await {
+            app.error = Some(format!("last project '{id}': {e:#}"));
+            app.status = "Could not load last project · choose or enter a source".into();
+        }
     }
 
     enable_raw_mode()?;
