@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Heatmap** TUI screen (`2` / tab): squarified treemap of function bytes
+  (same layout math as chaos-viewer). Colors: green matched, grey unmatched,
+  yellow claimed, cyan selection, magenta batched. Arrow keys / `hjkl` move
+  spatially; `enter` opens detail; `z` zooms the selected function’s module.
+  Tabs renumbered: 1 Overview · 2 Heatmap · 3 Priorities · 4 Detail · 5 Prompt ·
+  6 Claims.
+
 ### Fixed
 
 - Claims markdown parser no longer panics on Unicode placeholder rows (em dashes)

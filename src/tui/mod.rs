@@ -27,12 +27,14 @@ use crate::load::{
 use crate::prioritize::{priority_rows, PriorityMode};
 use crate::prompt::{batch_max, build_prompt, PromptOptions};
 use crate::schema::{format_pct, ChaosDb, ChaosFunction, FunctionDetail, ProjectConfig};
+use crate::treemap::{layout_treemap, navigable_functions, step_spatial, LayoutRect, TreemapLeaf};
 use theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Setup,
     Overview,
+    Heatmap,
     Priorities,
     Detail,
     Prompt,
@@ -43,6 +45,7 @@ impl Screen {
     fn all_loaded() -> &'static [Screen] {
         &[
             Screen::Overview,
+            Screen::Heatmap,
             Screen::Priorities,
             Screen::Detail,
             Screen::Prompt,
@@ -55,6 +58,7 @@ impl Screen {
         match self {
             Screen::Setup => "Setup",
             Screen::Overview => "Overview",
+            Screen::Heatmap => "Heatmap",
             Screen::Priorities => "Priorities",
             Screen::Detail => "Detail",
             Screen::Prompt => "Prompt",
@@ -62,14 +66,15 @@ impl Screen {
         }
     }
 
-    /// Hotkey digit for loaded pages (1–5).
+    /// Hotkey digit for loaded pages (1–6).
     fn hotkey(self) -> Option<char> {
         match self {
             Screen::Overview => Some('1'),
-            Screen::Priorities => Some('2'),
-            Screen::Detail => Some('3'),
-            Screen::Prompt => Some('4'),
-            Screen::Claims => Some('5'),
+            Screen::Heatmap => Some('2'),
+            Screen::Priorities => Some('3'),
+            Screen::Detail => Some('4'),
+            Screen::Prompt => Some('5'),
+            Screen::Claims => Some('6'),
             Screen::Setup => None,
         }
     }
@@ -175,6 +180,13 @@ struct App {
     prompt_scroll: u16,
     prompt_text: String,
     claims_session: Option<ClaimsSession>,
+    /// Heatmap: `None` = whole project; `Some(module)` zooms that module full-frame.
+    heatmap_zoom: Option<String>,
+    /// Index into the current navigable function list (reading order).
+    heatmap_sel: usize,
+    /// Last map canvas size used for layout (so nav matches what was drawn).
+    heatmap_cols: u16,
+    heatmap_rows: u16,
     show_help: bool,
     should_quit: bool,
 }
@@ -216,6 +228,10 @@ impl App {
             prompt_scroll: 0,
             prompt_text: String::new(),
             claims_session,
+            heatmap_zoom: None,
+            heatmap_sel: 0,
+            heatmap_cols: 80,
+            heatmap_rows: 24,
             show_help: false,
             should_quit: false,
         })
@@ -256,7 +272,7 @@ impl App {
         }
         vec![
             KeyHint {
-                key: "tab/1-5",
+                key: "tab/1-6",
                 action: "screens",
             },
             KeyHint {
@@ -305,6 +321,28 @@ impl App {
                     action: "copy prompt",
                 },
             ],
+            Screen::Heatmap => vec![
+                KeyHint {
+                    key: "←↑↓→/hjkl",
+                    action: "move",
+                },
+                KeyHint {
+                    key: "enter",
+                    action: "open detail",
+                },
+                KeyHint {
+                    key: "z",
+                    action: "zoom module",
+                },
+                KeyHint {
+                    key: "b",
+                    action: "batch",
+                },
+                KeyHint {
+                    key: "c",
+                    action: "copy prompt",
+                },
+            ],
             Screen::Priorities => vec![
                 KeyHint {
                     key: "j/k",
@@ -337,7 +375,7 @@ impl App {
                     action: "copy prompt",
                 },
                 KeyHint {
-                    key: "4",
+                    key: "5",
                     action: "prompt view",
                 },
             ],
@@ -374,7 +412,7 @@ GLOBAL
   ?           toggle this help
   q           quit
   tab / S-tab next / previous screen
-  1 2 3 4 5   Overview · Priorities · Detail · Prompt · Claims
+  1 2 3 4 5 6 Overview · Heatmap · Priorities · Detail · Prompt · Claims
   u           update progress (re-fetch chaos-db; matches can land mid-session)
   r           refresh claims only
   c           copy current prompt to clipboard
@@ -387,6 +425,12 @@ OVERVIEW
   enter       open function detail
   /           search (filter by name, module, id)
   esc         leave search
+
+HEATMAP
+  arrows/hjkl move selection on the squarified byte map
+  enter       open function detail
+  z           zoom into selected function's module (again to unzoom)
+  green = matched · grey = unmatched · yellow = claimed · cyan = selected
 
 PRIORITIES
   n           cycle Nearly / Scaffolded / Biggest
@@ -941,23 +985,31 @@ Press ? or esc to close help."#
                 self.status = "Overview".into();
             }
             KeyCode::Char('2') => {
+                self.screen = Screen::Heatmap;
+                self.sync_heatmap_sel_from_selected();
+                self.status = self.heatmap_status();
+            }
+            KeyCode::Char('3') => {
                 self.screen = Screen::Priorities;
                 self.rebuild_priorities();
                 self.status = format!("Priorities · {}", self.priority_mode.label());
             }
-            KeyCode::Char('3') => {
+            KeyCode::Char('4') => {
                 self.screen = Screen::Detail;
                 self.load_selected_detail().await;
                 self.status = "Detail".into();
             }
-            KeyCode::Char('4') => {
+            KeyCode::Char('5') => {
                 self.screen = Screen::Prompt;
                 self.rebuild_prompt().await;
                 self.status = "Prompt".into();
             }
-            KeyCode::Char('5') => {
+            KeyCode::Char('6') => {
                 self.screen = Screen::Claims;
                 self.status = format!("Claims · {}", self.claims_status);
+            }
+            KeyCode::Char('z') if self.screen == Screen::Heatmap => {
+                self.toggle_heatmap_zoom();
             }
             KeyCode::Char('/') => {
                 self.searching = true;
@@ -996,6 +1048,18 @@ Press ? or esc to close help."#
                     self.priority_list.len()
                 );
             }
+            KeyCode::Up | KeyCode::Char('k') if self.screen == Screen::Heatmap => {
+                self.move_heatmap(0, -1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.screen == Screen::Heatmap => {
+                self.move_heatmap(0, 1);
+            }
+            KeyCode::Left | KeyCode::Char('h') if self.screen == Screen::Heatmap => {
+                self.move_heatmap(-1, 0);
+            }
+            KeyCode::Right | KeyCode::Char('l') if self.screen == Screen::Heatmap => {
+                self.move_heatmap(1, 0);
+            }
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1).await,
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1).await,
             KeyCode::Left | KeyCode::Char('h') if self.screen == Screen::Overview => {
@@ -1021,6 +1085,10 @@ Press ? or esc to close help."#
                     self.screen = Screen::Detail;
                     self.load_selected_detail().await;
                     self.status = "Opened function detail".into();
+                } else if self.screen == Screen::Heatmap && self.selected_id.is_some() {
+                    self.screen = Screen::Detail;
+                    self.load_selected_detail().await;
+                    self.status = "Opened from heatmap".into();
                 }
             }
             KeyCode::PageUp if self.screen == Screen::Prompt => {
@@ -1062,6 +1130,10 @@ Press ? or esc to close help."#
             Screen::Priorities => {
                 self.rebuild_priorities();
                 self.status = format!("Priorities · {}", self.priority_mode.label());
+            }
+            Screen::Heatmap => {
+                self.sync_heatmap_sel_from_selected();
+                self.status = self.heatmap_status();
             }
             Screen::Claims => {
                 self.status = format!("Claims · {}", self.claims_status);
@@ -1115,6 +1187,289 @@ Press ? or esc to close help."#
         }
     }
 
+    /// Build treemap leaves from the loaded atlas (optional module zoom).
+    fn heatmap_leaves(&self) -> Vec<TreemapLeaf> {
+        let Some(db) = &self.db else {
+            return Vec::new();
+        };
+        db.functions.iter().map(TreemapLeaf::from).collect()
+    }
+
+    /// Layout at the last drawn canvas size (character cells of the map pane).
+    fn heatmap_layout(&self) -> Vec<LayoutRect> {
+        let cols = self.heatmap_cols.max(4);
+        let rows = self.heatmap_rows.max(3);
+        let leaves = self.heatmap_leaves();
+        layout_treemap(
+            &leaves,
+            cols as f64,
+            rows as f64,
+            self.heatmap_zoom.as_deref(),
+        )
+    }
+
+    fn heatmap_status(&self) -> String {
+        let zoom = self
+            .heatmap_zoom
+            .as_deref()
+            .map(|m| format!("zoom:{m}"))
+            .unwrap_or_else(|| "all modules".into());
+        if let Some(f) = self.selected_function() {
+            let state = if f.matched {
+                "matched"
+            } else if self.locked_by.contains_key(&f.id) {
+                "claimed"
+            } else {
+                "unmatched"
+            };
+            format!("Heatmap · {zoom} · {} · {state} · {}B", f.name, f.size)
+        } else {
+            format!("Heatmap · {zoom}")
+        }
+    }
+
+    fn sync_heatmap_sel_from_selected(&mut self) {
+        let rects = self.heatmap_layout();
+        let nav = navigable_functions(&rects);
+        if nav.is_empty() {
+            self.heatmap_sel = 0;
+            return;
+        }
+        if let Some(id) = self.selected_id.as_deref() {
+            if let Some(ni) = nav.iter().position(|&ri| rects[ri].id == id) {
+                self.heatmap_sel = ni;
+                return;
+            }
+        }
+        self.heatmap_sel = self.heatmap_sel.min(nav.len() - 1);
+        let id = rects[nav[self.heatmap_sel]].id.clone();
+        self.selected_id = Some(id);
+    }
+
+    fn move_heatmap(&mut self, dir_x: i8, dir_y: i8) {
+        let rects = self.heatmap_layout();
+        let nav = navigable_functions(&rects);
+        if nav.is_empty() {
+            return;
+        }
+        if self.heatmap_sel >= nav.len() {
+            self.heatmap_sel = 0;
+        }
+        self.heatmap_sel = step_spatial(&rects, &nav, self.heatmap_sel, dir_x, dir_y);
+        self.selected_id = Some(rects[nav[self.heatmap_sel]].id.clone());
+        self.status = self.heatmap_status();
+    }
+
+    fn toggle_heatmap_zoom(&mut self) {
+        if self.heatmap_zoom.is_some() {
+            self.heatmap_zoom = None;
+            self.sync_heatmap_sel_from_selected();
+            self.status = self.heatmap_status();
+            return;
+        }
+        if let Some(f) = self.selected_function() {
+            self.heatmap_zoom = Some(f.module.clone());
+            self.sync_heatmap_sel_from_selected();
+            self.status = self.heatmap_status();
+        } else {
+            self.status = "Heatmap · select a function before zoom".into();
+        }
+    }
+
+    fn draw_heatmap(&mut self, f: &mut Frame, area: Rect) {
+        if self.db.is_none() {
+            return;
+        }
+
+        let zoom_label = self
+            .heatmap_zoom
+            .as_deref()
+            .map(|m| format!("module {m}"))
+            .unwrap_or_else(|| "all modules".into());
+        let title = format!(
+            " Heatmap (bytes) · {zoom_label} · green=matched grey=unmatched yellow=claim · z zoom "
+        );
+        let block = content_block(title, &self.theme, self.theme.border);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        fill_pane(f, inner, &self.theme, self.theme.bg);
+
+        if inner.width < 4 || inner.height < 3 {
+            return;
+        }
+
+        // Map body: leave 1 row at bottom for the selection legend.
+        let map_h = inner.height.saturating_sub(1).max(1);
+        let map = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: map_h,
+        };
+        let legend = Rect {
+            x: inner.x,
+            y: inner.y + map_h,
+            width: inner.width,
+            height: 1,
+        };
+
+        self.heatmap_cols = map.width;
+        self.heatmap_rows = map.height;
+
+        let leaves: Vec<TreemapLeaf> = self
+            .db
+            .as_ref()
+            .map(|db| db.functions.iter().map(TreemapLeaf::from).collect())
+            .unwrap_or_default();
+        let zoom = self.heatmap_zoom.clone();
+        let rects = layout_treemap(
+            &leaves,
+            map.width as f64,
+            map.height as f64,
+            zoom.as_deref(),
+        );
+        let nav = navigable_functions(&rects);
+
+        if !nav.is_empty() {
+            if self.heatmap_sel >= nav.len() {
+                self.heatmap_sel = 0;
+            }
+            // Keep selected_id aligned with the drawn layout.
+            if let Some(want) = self.selected_id.clone() {
+                if let Some(ni) = nav.iter().position(|&ri| rects[ri].id == want) {
+                    self.heatmap_sel = ni;
+                } else {
+                    self.selected_id = Some(rects[nav[self.heatmap_sel]].id.clone());
+                }
+            } else {
+                self.selected_id = Some(rects[nav[self.heatmap_sel]].id.clone());
+            }
+        }
+
+        let selected_id = self.selected_id.clone();
+        let locked_ids: std::collections::HashSet<String> =
+            self.locked_by.keys().cloned().collect();
+        let batch = self.batch.clone();
+        let theme_bg = self.theme.bg;
+        let theme_panel = self.theme.panel;
+        let theme_text = self.theme.text;
+        let theme_muted = self.theme.muted;
+        let theme_accent = self.theme.accent;
+        let theme_matched = self.theme.matched;
+        let theme_unmatched = self.theme.unmatched;
+        let theme_claim = self.theme.claim;
+        let theme_batch = self.theme.batch;
+
+        // Legend text before buffer paint (needs db lookup).
+        let legend_text = if let Some(f) = selected_id
+            .as_ref()
+            .and_then(|id| self.db.as_ref().and_then(|db| db.find_by_id(id)))
+        {
+            let state = if f.matched {
+                "matched"
+            } else if locked_ids.contains(&f.id) {
+                "claimed"
+            } else {
+                "unmatched"
+            };
+            let batch_s = batch
+                .iter()
+                .position(|x| x == &f.id)
+                .map(|n| format!(" · [B{}]", n + 1))
+                .unwrap_or_default();
+            format!(
+                " {}  {}  0x{:x}  {}B  {state}{batch_s} ",
+                f.module, f.name, f.addr, f.size
+            )
+        } else {
+            " (no selection) ".into()
+        };
+
+        let buf = f.buffer_mut();
+
+        // Cell paint: module chrome first, then functions (overwrite).
+        for r in rects.iter().filter(|r| r.is_module) {
+            if let Some((cx, cy, cw, ch)) = r.cell_bounds(map.width, map.height) {
+                let style = paint_on(theme_muted, theme_panel);
+                for row in 0..ch {
+                    for col in 0..cw {
+                        let x = map.x + cx + col;
+                        let y = map.y + cy + row;
+                        let cell = &mut buf[(x, y)];
+                        cell.set_symbol(" ");
+                        cell.set_style(style);
+                    }
+                }
+                if let Some(label) = &r.module_label {
+                    if ch >= 1 && cw >= 4 {
+                        let text: String = label.chars().take(cw as usize).collect();
+                        let line =
+                            Line::from(Span::styled(text, paint_bold_on(theme_text, theme_panel)));
+                        buf.set_line(map.x + cx, map.y + cy, &line, cw);
+                    }
+                }
+            }
+        }
+
+        for r in rects.iter().filter(|r| !r.is_module) {
+            let Some((cx, cy, cw, ch)) = r.cell_bounds(map.width, map.height) else {
+                continue;
+            };
+            let is_sel = selected_id.as_deref() == Some(r.id.as_str());
+            let is_locked = locked_ids.contains(&r.id);
+            let is_batch = batch.iter().any(|x| x == &r.id);
+            let (fg, bg) = if is_sel {
+                (theme_bg, theme_accent)
+            } else if is_locked {
+                (theme_bg, theme_claim)
+            } else if is_batch {
+                (theme_text, theme_batch)
+            } else if r.matched {
+                (theme_bg, theme_matched)
+            } else {
+                (theme_text, theme_unmatched)
+            };
+            let style = if is_sel {
+                paint_bold_on(fg, bg)
+            } else {
+                paint_on(fg, bg)
+            };
+            let sym = if is_sel {
+                "█"
+            } else if r.matched {
+                "▓"
+            } else if is_locked {
+                "▒"
+            } else {
+                "░"
+            };
+            for row in 0..ch {
+                for col in 0..cw {
+                    let x = map.x + cx + col;
+                    let y = map.y + cy + row;
+                    let cell = &mut buf[(x, y)];
+                    cell.set_symbol(sym);
+                    cell.set_style(style);
+                }
+            }
+        }
+
+        let leg_style = paint_on(theme_text, theme_panel);
+        for col in 0..legend.width {
+            let cell = &mut buf[(legend.x + col, legend.y)];
+            cell.set_symbol(" ");
+            cell.set_style(leg_style);
+        }
+        let line = Line::from(Span::styled(
+            legend_text
+                .chars()
+                .take(legend.width as usize)
+                .collect::<String>(),
+            paint_on(theme_text, theme_panel),
+        ));
+        buf.set_line(legend.x, legend.y, &line, legend.width);
+    }
+
     fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
         // Entire frame solid dark first — no white terminal paper anywhere.
@@ -1139,6 +1494,7 @@ Press ? or esc to close help."#
         match self.screen {
             Screen::Setup => self.draw_setup(f, chunks[1]),
             Screen::Overview => self.draw_overview(f, chunks[1]),
+            Screen::Heatmap => self.draw_heatmap(f, chunks[1]),
             Screen::Priorities => self.draw_priorities(f, chunks[1]),
             Screen::Detail => self.draw_detail(f, chunks[1]),
             Screen::Prompt => self.draw_prompt(f, chunks[1]),
@@ -1151,7 +1507,7 @@ Press ? or esc to close help."#
         }
     }
 
-    /// All 5 pages on one line; current page marked as a reversed chip `[name]`.
+    /// All loaded pages on one line; current page marked as a reversed chip `[name]`.
     fn pages_line(&self, bg: Color) -> Line<'static> {
         let mut spans: Vec<Span<'static>> = Vec::new();
         spans.push(Span::styled(" ", paint_on(self.theme.muted, bg)));

@@ -7,6 +7,7 @@ pub mod load;
 pub mod prioritize;
 pub mod prompt;
 pub mod schema;
+pub mod treemap;
 pub mod tui;
 
 pub use claims::{
