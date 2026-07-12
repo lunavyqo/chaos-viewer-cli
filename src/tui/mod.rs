@@ -83,27 +83,24 @@ fn paint_bold_on(fg: Color, bg: Color) -> Style {
     Style::reset().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
 }
 
-/// Non-list chrome (status bar, help) — Reset is fine outside List highlight.
-fn paint(fg: Color) -> Style {
-    Style::reset().fg(fg).bg(Color::Reset)
-}
-
-fn paint_bold(fg: Color) -> Style {
-    paint_bold_on(fg, Color::Reset)
-}
-
 fn paint_list_base(theme: &Theme) -> Style {
     Style::reset().fg(theme.text).bg(theme.bg)
 }
 
-fn key_line(theme: &Theme, hints: &[KeyHint]) -> Line<'static> {
+fn key_line(theme: &Theme, hints: &[KeyHint], bg: Color) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, h) in hints.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled("  ", paint(theme.muted)));
+            spans.push(Span::styled("  ", paint_on(theme.muted, bg)));
         }
-        spans.push(Span::styled(h.key.to_string(), paint_bold(theme.key)));
-        spans.push(Span::styled(format!(" {}", h.action), paint(theme.muted)));
+        spans.push(Span::styled(
+            h.key.to_string(),
+            paint_bold_on(theme.key, bg),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", h.action),
+            paint_on(theme.muted, bg),
+        ));
     }
     Line::from(spans)
 }
@@ -1047,12 +1044,11 @@ Press ? or esc to close help."#
     }
 
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
+        let bg = self.theme.panel;
         let (status_text, status_style) = if let Some(err) = &self.error {
             (
                 format!("error · {err}"),
-                Style::default()
-                    .fg(self.theme.error)
-                    .add_modifier(Modifier::BOLD),
+                paint_bold_on(self.theme.error, bg),
             )
         } else if self.searching {
             (
@@ -1061,19 +1057,22 @@ Press ? or esc to close help."#
                     self.search,
                     self.fn_list.len()
                 ),
-                Style::default().fg(self.theme.accent),
+                paint_on(self.theme.accent, bg),
             )
         } else {
-            (self.status.clone(), Style::default().fg(self.theme.text))
+            (self.status.clone(), paint_on(self.theme.text, bg))
         };
 
         let block = Block::default()
             .title(" controls ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border))
-            .style(Style::default().bg(self.theme.panel));
+            .border_style(paint_on(self.theme.border, bg))
+            .style(paint_on(self.theme.text, bg));
         let inner = block.inner(area);
         f.render_widget(block, area);
+        // Solid fill so Reset/default never shows as white terminal paper.
+        f.render_widget(Clear, inner);
+        f.render_widget(Block::default().style(paint_on(self.theme.text, bg)), inner);
 
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -1085,11 +1084,13 @@ Press ? or esc to close help."#
             .split(inner);
 
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(status_text, status_style))),
+            Paragraph::new(Line::from(Span::styled(status_text, status_style)))
+                .style(paint_on(self.theme.text, bg)),
             rows[0],
         );
         f.render_widget(
-            Paragraph::new(key_line(&self.theme, &self.global_hints())),
+            Paragraph::new(key_line(&self.theme, &self.global_hints(), bg))
+                .style(paint_on(self.theme.text, bg)),
             rows[1],
         );
         let ctx = self.context_hints();
@@ -1097,12 +1098,17 @@ Press ? or esc to close help."#
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "this screen · (see ? for full map)",
-                    Style::default().fg(self.theme.muted),
-                ))),
+                    paint_on(self.theme.muted, bg),
+                )))
+                .style(paint_on(self.theme.text, bg)),
                 rows[2],
             );
         } else {
-            f.render_widget(Paragraph::new(key_line(&self.theme, &ctx)), rows[2]);
+            f.render_widget(
+                Paragraph::new(key_line(&self.theme, &ctx, bg))
+                    .style(paint_on(self.theme.text, bg)),
+                rows[2],
+            );
         }
     }
 
