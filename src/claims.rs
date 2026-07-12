@@ -67,6 +67,11 @@ struct ClaimsApiResponse {
 }
 
 /// Parse a repo CLAIMS.md table into locks (ports web viewer logic).
+///
+/// Supports both sm64ds-style rows:
+/// `| ov002 func_x (0x021019d0, size 0x5470) | handle | date | status |`
+/// and electroplankton-style rows:
+/// `| Module | Range | Claimant | Date | Status | Notes |`
 pub fn parse_claims_md(text: &str) -> Vec<Claim> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -77,15 +82,31 @@ pub fn parse_claims_md(text: &str) -> Vec<Claim> {
         if raw.len() < 5 {
             continue;
         }
-        // indices 1..len-1 are cells
+        // drop leading/trailing empties from outer pipes
         let cells: Vec<&str> = raw[1..raw.len() - 1].to_vec();
         if cells.len() < 4 {
             continue;
         }
-        let range = cells[0];
-        let who = cells[1];
-        let status = cells[3];
-        if range.chars().all(|c| c == '-') || (range.starts_with('_') && range.ends_with('_')) {
+
+        // Layout detection: if first cell looks like a module-only column and
+        // second cell holds the range, use electroplankton-style columns
+        // (Module | Range | Claimant | Date | Status | Notes).
+        let (range, who, status) = if cells.len() >= 5
+            && looks_like_module_cell(cells[0])
+            && (cells[1].contains("0x")
+                || cells[1].contains("0X")
+                || is_placeholder_cell(cells[1]))
+        {
+            (cells[1], cells[2], cells[4])
+        } else {
+            // sm64ds-style: Range | Who | Date | Status
+            (cells[0], cells[1], cells[3])
+        };
+
+        if is_placeholder_cell(range)
+            || is_separator_cell(range)
+            || (range.starts_with('_') && range.ends_with('_'))
+        {
             continue;
         }
         let status_l = status.to_ascii_lowercase();
@@ -95,40 +116,65 @@ pub fn parse_claims_md(text: &str) -> Vec<Claim> {
         {
             continue;
         }
-        if range.eq_ignore_ascii_case("Range") || range == "范围" {
+        if is_header_range_cell(range) {
+            continue;
+        }
+        // No address payload → not a claim row (headers, placeholders, notes)
+        if !range.contains("0x") && !range.contains("0X") {
             continue;
         }
 
-        let row_mod = extract_module(range);
+        let module_hint = extract_module(range)
+            .or_else(|| cells.first().and_then(|c| extract_module(c)))
+            .or_else(|| {
+                // electroplankton Module column
+                if looks_like_module_cell(cells[0]) {
+                    Some(cells[0].to_string())
+                } else {
+                    None
+                }
+            });
+
         let mut found = false;
-        // (optional_token)(0xADDR, size 0xSZ)
-        let bytes = range.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if let Some((mod_tok, start, size, end_idx)) = parse_span_at(range, i) {
-                found = true;
-                let module = mod_tok
-                    .and_then(extract_module)
-                    .or_else(|| row_mod.clone())
-                    .unwrap_or_else(|| "arm9".into());
-                out.push(Claim {
-                    id: None,
-                    module,
-                    start: AddrValue::Num(start),
-                    end: AddrValue::Num(start + size),
-                    handle: Some(who.to_string()),
-                    note: None,
-                });
-                i = end_idx;
-            } else {
-                i += 1;
+        let mut search_from = 0;
+        while search_from < range.len() {
+            // Always advance on UTF-8 char boundaries.
+            if !range.is_char_boundary(search_from) {
+                search_from += 1;
+                continue;
+            }
+            match parse_span_from(range, search_from) {
+                Some((mod_tok, start, size, next)) => {
+                    found = true;
+                    let module = mod_tok
+                        .and_then(extract_module)
+                        .or_else(|| module_hint.clone())
+                        .unwrap_or_else(|| "arm9".into());
+                    out.push(Claim {
+                        id: None,
+                        module,
+                        start: AddrValue::Num(start),
+                        end: AddrValue::Num(start + size),
+                        handle: Some(who.to_string()),
+                        note: None,
+                    });
+                    search_from = next.max(search_from + 1);
+                }
+                None => {
+                    // Step one Unicode scalar, not one byte.
+                    match range[search_from..].chars().next() {
+                        Some(c) => search_from += c.len_utf8(),
+                        None => break,
+                    }
+                }
             }
         }
         if !found {
-            if let (Some(mod_name), Some((s, e))) = (row_mod, parse_bare_range(range)) {
+            if let Some((s, e)) = parse_bare_range(range) {
+                let module = module_hint.unwrap_or_else(|| "arm9".into());
                 out.push(Claim {
                     id: None,
-                    module: mod_name,
+                    module,
                     start: AddrValue::Num(s),
                     end: AddrValue::Num(e),
                     handle: Some(who.to_string()),
@@ -140,76 +186,141 @@ pub fn parse_claims_md(text: &str) -> Vec<Claim> {
     out
 }
 
+fn is_placeholder_cell(s: &str) -> bool {
+    let t = s.trim();
+    t.is_empty()
+        || t == "—"
+        || t == "–"
+        || t == "-"
+        || t.chars().all(|c| matches!(c, '-' | '—' | '–' | ' ' | '\t'))
+}
+
+fn is_separator_cell(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty() && t.chars().all(|c| c == '-' || c == ':')
+}
+
+fn is_header_range_cell(s: &str) -> bool {
+    let t = s.trim();
+    t.eq_ignore_ascii_case("Range")
+        || t == "范围"
+        || t.to_ascii_lowercase().starts_with("range")
+        || t.eq_ignore_ascii_case("Module")
+}
+
+fn looks_like_module_cell(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() || is_placeholder_cell(t) {
+        return false;
+    }
+    if extract_module(t).is_some() {
+        return true;
+    }
+    // bare module labels without addresses
+    let lower = t.to_ascii_lowercase();
+    lower == "arm7"
+        || lower == "arm9"
+        || lower.starts_with("ov")
+        || (!t.contains("0x") && !t.contains('(') && t.len() < 32)
+}
+
 fn extract_module(s: &str) -> Option<String> {
-    // ovNNN
-    let bytes = s.as_bytes();
-    for i in 0..bytes.len().saturating_sub(4) {
-        if bytes[i] == b'o'
-            && bytes[i + 1] == b'v'
-            && bytes[i + 2].is_ascii_digit()
-            && bytes[i + 3].is_ascii_digit()
-            && bytes
-                .get(i + 4)
-                .map(|c| c.is_ascii_digit())
-                .unwrap_or(false)
+    // ovNNN via char-safe search
+    let lower = s.to_ascii_lowercase();
+    if let Some(i) = lower.find("ov") {
+        let rest = &s[i..];
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 5
+            && bytes[0].eq_ignore_ascii_case(&b'o')
+            && bytes[1].eq_ignore_ascii_case(&b'v')
+            && bytes[2].is_ascii_digit()
+            && bytes[3].is_ascii_digit()
+            && bytes[4].is_ascii_digit()
         {
-            return Some(s[i..i + 5].to_string());
+            return Some(rest[..5].to_string());
         }
     }
-    if s.to_ascii_lowercase().contains("arm9") {
+    let lower = s.to_ascii_lowercase();
+    if lower.contains("arm9") {
         return Some("arm9".into());
+    }
+    if lower.contains("arm7") {
+        return Some("arm7".into());
     }
     None
 }
 
-fn parse_span_at(s: &str, start_idx: usize) -> Option<(Option<&str>, u64, u64, usize)> {
-    // look for (0x...., size 0x....) starting at or after start_idx
-    let rest = &s[start_idx..];
-    let open = rest.find("(0x")?;
-    let after_open = open + 1;
-    let rest2 = &rest[after_open..];
-    let comma = rest2.find(',')?;
-    let addr_s = rest2[..comma].trim();
-    let after_comma = &rest2[comma + 1..];
-    let size_key = after_comma.to_ascii_lowercase();
-    let size_pos = size_key.find("size")?;
-    let after_size = after_comma[size_pos + 4..].trim_start();
-    let close = after_size.find(')')?;
-    let size_s = after_size[..close].trim();
+/// Find next `(0xADDR, size 0xSZ)` span at or after `from` (byte index, char boundary).
+fn parse_span_from(s: &str, from: usize) -> Option<(Option<&str>, u64, u64, usize)> {
+    if from > s.len() || !s.is_char_boundary(from) {
+        return None;
+    }
+    let rest = &s[from..];
+    let open_rel = rest.find("(0x").or_else(|| rest.find("(0X"))?;
+    let open_abs = from + open_rel;
+    let after_paren = open_abs + 1; // '(' is ASCII
+    if after_paren >= s.len() {
+        return None;
+    }
+    let after = &s[after_paren..];
+    let close_rel = after.find(')')?;
+    let inside = after.get(..close_rel)?;
+    // inside: 0xADDR, size 0xSZ
+    let comma = inside.find(',')?;
+    let addr_s = inside.get(..comma)?.trim();
+    let after_comma = inside.get(comma + 1..)?.trim();
+    let size_l = after_comma.to_ascii_lowercase();
+    let size_idx = size_l.find("size")?;
+    let size_s = after_comma.get(size_idx + 4..)?.trim();
     let start = parse_hex(addr_s)?;
     let size = parse_hex(size_s)?;
-    let end_idx = start_idx
-        + after_open
-        + comma
-        + 1
-        + size_pos
-        + 4
-        + (after_size.len() - after_size[close..].len())
-        + close
-        + 1;
-    // prefix token before (
-    let prefix = rest[..open].trim();
+    let end_abs = after_paren + close_rel + 1;
+
+    let prefix = s.get(from..open_abs)?.trim();
     let mod_tok = if prefix.is_empty() {
         None
     } else {
         Some(prefix.split_whitespace().last().unwrap_or(prefix))
     };
-    // simplify end_idx
-    let abs_close = s[start_idx..].find("(0x")? + start_idx;
-    let close_abs = s[abs_close..].find(')')? + abs_close + 1;
-    Some((mod_tok, start, size, close_abs.max(end_idx)))
+    Some((mod_tok, start, size, end_abs))
 }
 
 fn parse_bare_range(range: &str) -> Option<(u64, u64)> {
-    // 0xA-0xB
-    let lower = range;
-    let dash = lower.find('-')?;
-    let left = lower[..dash].trim();
-    let right = lower[dash + 1..].trim();
-    // find hex on each side
-    let s = extract_hex(left)?;
-    let e = extract_hex(right)?;
-    Some((s, e))
+    // Prefer "0xA-0xB" / "0xA - 0xB" forms; ASCII hyphen or en/em dash.
+    let mut hexs = Vec::new();
+    let mut i = 0;
+    while i < range.len() {
+        if !range.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        let rest = &range[i..];
+        if let Some(rel) = rest.find("0x").or_else(|| rest.find("0X")) {
+            let start = i + rel;
+            if let Some(val) = extract_hex(&range[start..]) {
+                hexs.push(val);
+                // advance past this hex token
+                let tok = &range[start..];
+                let end = tok
+                    .char_indices()
+                    .skip(2)
+                    .find(|(_, c)| !c.is_ascii_hexdigit())
+                    .map(|(j, _)| start + j)
+                    .unwrap_or(range.len());
+                i = end;
+                continue;
+            }
+        }
+        match range[i..].chars().next() {
+            Some(c) => i += c.len_utf8(),
+            None => break,
+        }
+    }
+    if hexs.len() >= 2 {
+        Some((hexs[0], hexs[1]))
+    } else {
+        None
+    }
 }
 
 fn extract_hex(s: &str) -> Option<u64> {
@@ -339,6 +450,33 @@ mod tests {
         assert_eq!(claims[0].module, "ov002");
         assert_eq!(claims[0].start.to_u64(), 0x021019d0);
         assert_eq!(claims[0].end.to_u64(), 0x021019d0 + 0x100);
+        assert_eq!(claims[0].handle.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn parse_claims_md_em_dash_placeholder_no_panic() {
+        // electroplankton-style empty table uses Unicode em dashes
+        let md = r#"
+| Module | Range (inclusive) | Claimant | Date (UTC) | Status | Notes |
+|--------|-------------------|----------|------------|--------|-------|
+| —      | —                 | —        | —          | —      | empty |
+"#;
+        let claims = parse_claims_md(md);
+        assert!(claims.is_empty());
+    }
+
+    #[test]
+    fn parse_claims_md_electroplankton_columns() {
+        let md = r#"
+| Module | Range (inclusive) | Claimant | Date (UTC) | Status | Notes |
+|--------|-------------------|----------|------------|--------|-------|
+| arm9   | 0x02000000-0x02001000 | alice | 2026-07-12 | active | working |
+"#;
+        let claims = parse_claims_md(md);
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].module, "arm9");
+        assert_eq!(claims[0].start.to_u64(), 0x02000000);
+        assert_eq!(claims[0].end.to_u64(), 0x02001000);
         assert_eq!(claims[0].handle.as_deref(), Some("alice"));
     }
 
