@@ -21,6 +21,7 @@ use reqwest::Client;
 
 use crate::claims::{load_claims, merge_locked_map, ClaimsSession};
 use crate::clipboard::copy_text;
+use crate::discover::sources_equivalent;
 use crate::load::{
     details_base_from_source, load_chaos_db, load_function_detail, DataSource, DetailCache,
 };
@@ -188,6 +189,8 @@ struct App {
     theme: Theme,
     screen: Screen,
     setup_input: String,
+    /// Original load key (GitHub repo URL / path as typed) — never the discovered raw JSON URL.
+    load_input: Option<String>,
     /// Saved multi-repo profiles.
     project_store: ProjectStore,
     project_sel: usize,
@@ -264,6 +267,7 @@ impl App {
             theme: Theme::default(),
             screen: Screen::Setup,
             setup_input: String::new(),
+            load_input: None,
             project_store,
             project_sel,
             setup_list_focus: true,
@@ -573,14 +577,41 @@ Press ? or esc to close help."#
         };
         let base = details_base_from_source(&source);
         self.detail_cache = Some(DetailCache::new(base));
+        // Keep the *user* source for save/resume; discovery may set source to a raw JSON URL.
+        self.load_input = Some(input.to_string());
+        self.setup_input = input.to_string();
         self.source = Some(source);
         // Switching repo clears batch / selection noise.
         self.batch.clear();
         self.selected_id = None;
         self.detail = None;
         self.invalidate_detail_lines();
+        // Align active profile with what we actually loaded (or clear a stale one).
+        self.sync_active_project_to_load_input();
         self.apply_db(db, true).await;
         Ok(())
+    }
+
+    /// Prefer matching a saved profile to `load_input`; otherwise clear active.
+    fn sync_active_project_to_load_input(&mut self) {
+        let Some(key) = self.load_input.clone() else {
+            return;
+        };
+        if let Some(p) = self
+            .project_store
+            .projects
+            .iter()
+            .find(|p| sources_equivalent(&p.source, &key))
+            .cloned()
+        {
+            let _ = self.project_store.set_active(Some(&p.id));
+            if let Some(i) = self.project_store.index_of(&p.id) {
+                self.project_sel = i;
+            }
+        } else {
+            // Don't keep showing e.g. electroplankton as active after freeform-loading sm64ds.
+            let _ = self.project_store.set_active(None);
+        }
     }
 
     async fn load_project_by_id(&mut self, id: &str) -> Result<()> {
@@ -589,38 +620,55 @@ Press ? or esc to close help."#
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown project '{id}'"))?;
-        self.setup_input = profile.source.clone();
+        // set_active after successful load only — via load_from_with_branch sync
         self.load_from_with_branch(&profile.source, profile.branch.as_deref())
             .await?;
+        // Force this profile active even if source matching failed (e.g. local path forms).
         self.project_store.set_active(Some(&profile.id))?;
         if let Some(i) = self.project_store.index_of(&profile.id) {
             self.project_sel = i;
         }
-        self.status = format!("Loaded project {} ({})", profile.name, profile.id);
+        self.status = format!(
+            "Loaded project {} ({}) · {}",
+            profile.name, profile.id, profile.source
+        );
         Ok(())
     }
 
+    /// Source string to persist for a profile — original GitHub/path, never discovered raw atlas URL.
+    fn profile_source_to_save(&self) -> Result<String> {
+        if let Some(key) = self
+            .load_input
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            return Ok(key.to_string());
+        }
+        let typed = self.setup_input.trim();
+        if !typed.is_empty() {
+            return Ok(typed.to_string());
+        }
+        // Last resort: local path only (not raw.githubusercontent — that is an artifact of discovery).
+        if let Some(DataSource::Path(p)) = &self.source {
+            return Ok(p.display().to_string());
+        }
+        anyhow::bail!("nothing to save — type a path/URL or load a project first")
+    }
+
     fn save_current_source_as_project(&mut self, id: &str) -> Result<()> {
-        let source = {
-            let typed = self.setup_input.trim();
-            if !typed.is_empty() {
-                typed.to_string()
-            } else if let Some(src) = self.source.as_ref().map(|s| s.display()) {
-                src
-            } else {
-                anyhow::bail!("nothing to save — type a path/URL or load a project first");
-            }
-        };
+        let source = self.profile_source_to_save()?;
         let id = crate::projects::sanitize_project_id(id)?;
         let name = id.clone();
         self.project_store.upsert(ProjectProfile {
             id: id.clone(),
             name,
-            source,
+            source: source.clone(),
             branch: None,
         })?;
         self.project_store.set_active(Some(&id))?;
         self.project_sel = self.project_store.index_of(&id).unwrap_or(0);
+        self.load_input = Some(source);
         Ok(())
     }
 
@@ -637,10 +685,11 @@ Press ? or esc to close help."#
     /// Re-fetch atlas data from the current source (local file or URL).
     /// Matches / stats can change while you work; this picks up the latest publish.
     async fn update_progress(&mut self) -> Result<()> {
+        // Prefer original GitHub/path key so we re-discover; not a stashed raw JSON URL only.
         let input = self
-            .source
-            .as_ref()
-            .map(|s| s.display())
+            .load_input
+            .clone()
+            .or_else(|| self.source.as_ref().map(|s| s.display()))
             .ok_or_else(|| anyhow::anyhow!("no data loaded yet"))?;
         self.status = "Updating progress…".into();
         self.error = None;
@@ -651,9 +700,17 @@ Press ? or esc to close help."#
         let prev_screen = self.screen;
         let prev_priority_mode = self.priority_mode;
 
-        let (db, source) = load_chaos_db(&self.client, Some(&input), None, None).await?;
+        let (db, source) = if input.contains("github.com/")
+            && !input.contains("raw.githubusercontent.com")
+            && !input.ends_with(".json")
+        {
+            load_chaos_db(&self.client, None, Some(&input), None).await?
+        } else {
+            load_chaos_db(&self.client, Some(&input), None, None).await?
+        };
         let base = details_base_from_source(&source);
         self.detail_cache = Some(DetailCache::new(base));
+        self.load_input = Some(input);
         self.source = Some(source);
 
         self.priority_mode = prev_priority_mode;
@@ -1498,10 +1555,8 @@ Add functions with b on Overview or Priorities \
                     }
                 }
                 KeyCode::Char('s') => {
-                    let suggest = if !self.setup_input.trim().is_empty() {
-                        ProjectStore::suggest_id(&self.setup_input)
-                    } else if let Some(src) = self.source.as_ref() {
-                        ProjectStore::suggest_id(&src.display())
+                    let suggest = if let Ok(src) = self.profile_source_to_save() {
+                        ProjectStore::suggest_id(&src)
                     } else if let Some(p) = self.project_store.projects.get(self.project_sel) {
                         p.id.clone()
                     } else {
@@ -2072,11 +2127,13 @@ Add functions with b on Overview or Priorities \
             } else {
                 format!("batch {} ★", self.batch_summary())
             };
-            let proj = self
-                .project_store
-                .active_id
-                .as_deref()
-                .unwrap_or(db.project_name());
+            // Prefer atlas project name (truth of loaded data); append profile id if set.
+            let atlas = db.project_name();
+            let proj = match self.project_store.active_id.as_deref() {
+                Some(id) if id != atlas => format!("{atlas} [{id}]"),
+                Some(id) => id.to_string(),
+                None => atlas.to_string(),
+            };
             format!(
                 " chaos  ·  {proj}  ·  {}/{} fn ({}%)  ·  {batch_bit}  ·  gen {gen}  ·  p projects",
                 db.stats.matched_functions,
@@ -2743,11 +2800,10 @@ pub async fn run(
             app.status = "Project load failed · pick another".into();
         }
     } else if let Some(repo) = repo {
-        let (db, source) = load_chaos_db(&app.client, None, Some(&repo), branch.as_deref()).await?;
-        let base = details_base_from_source(&source);
-        app.detail_cache = Some(DetailCache::new(base));
-        app.source = Some(source);
-        app.apply_db(db, true).await;
+        if let Err(e) = app.load_from_with_branch(&repo, branch.as_deref()).await {
+            app.error = Some(format!("{e:#}"));
+            app.status = "Repo load failed".into();
+        }
     } else if let Some(input) = input {
         app.load_from(&input).await?;
     } else if let Some(id) = app.project_store.active_id.clone() {

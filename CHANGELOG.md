@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Project save no longer stores the discovered raw `chaos-db.json` URL (which
+  made a “sm64ds” profile keep loading electroplankton). Saves/resumes use the
+  original GitHub/path key; freeform loads clear a stale active profile; header
+  prefers the atlas project name; id suggestions use the repo name.
+
 ### Added
 
 - **Multi-repo projects**: save path/URL/GitHub profiles in
