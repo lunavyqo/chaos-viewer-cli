@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Overview **detail pane scroll**: `PgUp`/`PgDn` (page) and `[`/`]` (line);
+  title shows `lines a–b/total`. Full draft/disasm/pool are included (no longer
+  hard-truncated to a few lines).
+
 ### Changed
 
 - **Detail is part of Overview**: modules and functions on top, a full-width
