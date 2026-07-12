@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Heatmap** TUI screen (`2` / tab): view-only squarified byte treemap (same
+  layout math as chaos-viewer), painted with block glyphs (`░` unmatched, `▓`
+  matched, `▒` claimed, `█` selected). Selection comes from Overview/Priorities;
+  no heatmap-local controls. Tabs renumbered: 1 Overview · 2 Heatmap ·
+  3 Priorities · 4 Detail · 5 Prompt · 6 Claims.
+
 ### Fixed
 
 - Claims markdown parser no longer panics on Unicode placeholder rows (em dashes)
