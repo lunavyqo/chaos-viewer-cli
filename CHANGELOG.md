@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - TUI controls are always visible: numbered tabs (`1`–`5`), highlighted key hints
   in a bottom controls bar, and a `?` help overlay. `esc` no longer quits; use `q`.
+- Batched functions show violet **`[B1]` / `[B2]`…** badges in Overview and
+  Priorities lists, header batch count, detail/prompt titles, and a prompt roster.
 
 ### Added
 

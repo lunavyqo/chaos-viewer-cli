@@ -311,6 +311,7 @@ GLOBAL
   r           refresh claims
   c           copy current prompt to clipboard
   b           add/remove selected function from batch (max 16)
+              batched rows show violet [B1] [B2] … badges in lists
 
 OVERVIEW
   j / k       next / previous function  (also ↑ ↓)
@@ -543,18 +544,53 @@ Press ? or esc to close help."#
 
     fn toggle_batch_selected(&mut self) {
         let Some(id) = self.selected_id.clone() else {
+            self.status = "Nothing selected to batch · pick a function first".into();
             return;
         };
+        let name = self
+            .selected_function()
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| id.clone());
         if let Some(pos) = self.batch.iter().position(|x| x == &id) {
             self.batch.remove(pos);
-            self.status = "Removed from batch".into();
+            self.status = format!(
+                "Removed {name} from batch · now {}/{}",
+                self.batch.len(),
+                batch_max()
+            );
         } else if self.batch.len() < batch_max() {
             self.batch.push(id);
-            self.status = format!("Batch {}/{}", self.batch.len(), batch_max());
+            self.status = format!(
+                "Batched {name} · {}/{}  (B badge in lists)",
+                self.batch.len(),
+                batch_max()
+            );
         } else {
-            self.status = format!("Batch full ({})", batch_max());
+            self.status = format!("Batch full ({}/{})", self.batch.len(), batch_max());
         }
         self.rebuild_prompt();
+    }
+
+    /// 1-based position in the prompt batch, if present.
+    fn batch_index(&self, id: &str) -> Option<usize> {
+        self.batch.iter().position(|x| x == id).map(|i| i + 1)
+    }
+
+    fn batch_badge_spans(&self, id: &str) -> Vec<Span<'static>> {
+        if let Some(n) = self.batch_index(id) {
+            vec![Span::styled(
+                format!("[B{n}] "),
+                Style::default()
+                    .fg(self.theme.batch)
+                    .add_modifier(Modifier::BOLD),
+            )]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn batch_summary(&self) -> String {
+        format!("{}/{}", self.batch.len(), batch_max())
     }
 
     fn copy_prompt(&mut self) {
@@ -871,17 +907,22 @@ Press ? or esc to close help."#
 
     fn draw_header(&self, f: &mut Frame, area: Rect) {
         let title = if let Some(db) = &self.db {
+            let gen = if db.generated_at.is_empty() {
+                "—"
+            } else {
+                db.generated_at.as_str()
+            };
+            let batch_bit = if self.batch.is_empty() {
+                format!("batch {}", self.batch_summary())
+            } else {
+                format!("batch {} ★", self.batch_summary())
+            };
             format!(
-                " chaos  ·  {}  ·  {}/{} fn ({}%)  ·  gen {}",
+                " chaos  ·  {}  ·  {}/{} fn ({}%)  ·  {batch_bit}  ·  gen {gen}",
                 db.project_name(),
                 db.stats.matched_functions,
                 db.stats.total_functions,
                 format_pct(db.stats.matched_functions, db.stats.total_functions),
-                if db.generated_at.is_empty() {
-                    "—"
-                } else {
-                    db.generated_at.as_str()
-                }
             )
         } else {
             " chaos  ·  Chaos Viewer CLI  ·  press ? for help".into()
@@ -1100,19 +1141,44 @@ Press ? or esc to close help."#
                 } else {
                     self.theme.unmatched
                 };
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("[{badge}] "), Style::default().fg(color)),
-                    Span::raw(format!("{}  0x{:x}  {}B", f.name, f.addr, f.size)),
-                ]))
+                let in_batch = self.batch_index(&f.id).is_some();
+                let name_style = if in_batch {
+                    Style::default()
+                        .fg(self.theme.batch)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.theme.text)
+                };
+                let mut spans = vec![Span::styled(
+                    format!("[{badge}] "),
+                    Style::default().fg(color),
+                )];
+                spans.extend(self.batch_badge_spans(&f.id));
+                spans.push(Span::styled(
+                    format!("{}  0x{:x}  {}B", f.name, f.addr, f.size),
+                    name_style,
+                ));
+                ListItem::new(Line::from(spans))
             })
             .collect();
+        let batched_visible = self
+            .fn_list
+            .iter()
+            .filter(|&&idx| self.batch_index(&db.functions[idx].id).is_some())
+            .count();
         let title = if self.search.is_empty() {
-            format!(" Functions ({})  (j/k · enter · /) ", self.fn_list.len())
+            format!(
+                " Functions ({})  ·  batch {} ({} here)  ·  j/k enter / b ",
+                self.fn_list.len(),
+                self.batch_summary(),
+                batched_visible
+            )
         } else {
             format!(
-                " Functions ({}) · filter /{}  (enter done) ",
+                " Functions ({}) · /{}  ·  batch {}  ·  enter done ",
                 self.fn_list.len(),
-                self.search
+                self.search,
+                self.batch_summary()
             )
         };
         let fns = List::new(fn_items)
@@ -1135,9 +1201,10 @@ Press ? or esc to close help."#
     fn draw_priorities(&mut self, f: &mut Frame, area: Rect) {
         let Some(db) = &self.db else { return };
         let title = format!(
-            " {}  ·  {} rows  ·  n cycle · enter open ",
+            " {}  ·  {} rows  ·  batch {}  ·  n cycle · enter · b ",
             self.priority_mode.label(),
-            self.priority_list.len()
+            self.priority_list.len(),
+            self.batch_summary()
         );
         let items: Vec<ListItem> = self
             .priority_list
@@ -1149,7 +1216,20 @@ Press ? or esc to close help."#
                     PriorityMode::Scaffolded => format!("sim={:.2}", f.sim.unwrap_or(0.0)),
                     PriorityMode::Biggest => format!("{}B", f.size),
                 };
-                ListItem::new(format!("{}  {}  0x{:x}  {extra}", f.module, f.name, f.addr))
+                let in_batch = self.batch_index(&f.id).is_some();
+                let name_style = if in_batch {
+                    Style::default()
+                        .fg(self.theme.batch)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.theme.text)
+                };
+                let mut spans = self.batch_badge_spans(&f.id);
+                spans.push(Span::styled(
+                    format!("{}  {}  0x{:x}  {extra}", f.module, f.name, f.addr),
+                    name_style,
+                ));
+                ListItem::new(Line::from(spans))
             })
             .collect();
         let list = List::new(items)
@@ -1170,14 +1250,13 @@ Press ? or esc to close help."#
     }
 
     fn draw_detail(&self, f: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .title(" Function detail ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border));
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-
         let Some(fn_) = self.selected_function() else {
+            let block = Block::default()
+                .title(" Function detail ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(self.theme.border));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
             f.render_widget(
                 Paragraph::new("No function selected. Pick one in Overview or Priorities.")
                     .style(Style::default().fg(self.theme.muted)),
@@ -1185,6 +1264,22 @@ Press ? or esc to close help."#
             );
             return;
         };
+
+        let title = if let Some(n) = self.batch_index(&fn_.id) {
+            format!(" Function detail  ·  BATCHED [B{n}] ")
+        } else {
+            " Function detail ".into()
+        };
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(if self.batch_index(&fn_.id).is_some() {
+                self.theme.batch
+            } else {
+                self.theme.border
+            }));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
 
         let locked = self
             .locked_by
@@ -1237,12 +1332,18 @@ Press ? or esc to close help."#
             lines.push(String::new());
             lines.push("(no detail chunk loaded for this module)".into());
         }
-        let in_batch = self.batch.iter().any(|id| id == &fn_.id);
         lines.push(String::new());
-        lines.push(format!(
-            "batch: {}  ·  press b to toggle  ·  c copy prompt",
-            if in_batch { "yes" } else { "no" }
-        ));
+        if let Some(n) = self.batch_index(&fn_.id) {
+            lines.push(format!(
+                "BATCHED  [B{n}]  ·  position {n}/{}  ·  press b to remove  ·  c copy",
+                self.batch.len()
+            ));
+        } else {
+            lines.push(format!(
+                "not in batch  ·  press b to add ({})  ·  c copy prompt",
+                self.batch_summary()
+            ));
+        }
 
         f.render_widget(
             Paragraph::new(lines.join("\n"))
@@ -1253,23 +1354,62 @@ Press ? or esc to close help."#
     }
 
     fn draw_prompt(&self, f: &mut Frame, area: Rect) {
+        let roster: String = if self.batch.is_empty() {
+            "batch empty — select functions and press b (or copy single selection)".into()
+        } else if let Some(db) = &self.db {
+            self.batch
+                .iter()
+                .enumerate()
+                .filter_map(|(i, id)| {
+                    db.find_by_id(id)
+                        .map(|f| format!("[B{}] {}", i + 1, f.name))
+                })
+                .collect::<Vec<_>>()
+                .join("  ·  ")
+        } else {
+            format!("batch {}", self.batch_summary())
+        };
+
         let title = format!(
-            " Prompt  ·  batch {}/{}  ·  PgUp/PgDn scroll  ·  c copy ",
-            self.batch.len(),
-            batch_max()
+            " Prompt  ·  batch {}  ·  c copy · j/k scroll ",
+            self.batch_summary()
         );
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border));
+            .border_style(Style::default().fg(if self.batch.is_empty() {
+                self.theme.border
+            } else {
+                self.theme.batch
+            }));
         let inner = block.inner(area);
         f.render_widget(block, area);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(2), Constraint::Min(1)])
+            .split(inner);
+
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                roster,
+                Style::default()
+                    .fg(if self.batch.is_empty() {
+                        self.theme.muted
+                    } else {
+                        self.theme.batch
+                    })
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .wrap(Wrap { trim: true }),
+            chunks[0],
+        );
         f.render_widget(
             Paragraph::new(self.prompt_text.as_str())
                 .style(Style::default().fg(self.theme.text))
                 .wrap(Wrap { trim: false })
                 .scroll((self.prompt_scroll, 0)),
-            inner,
+            chunks[1],
         );
     }
 
