@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - List row colors no longer look uniformly “stuck” until you move the cursor:
   styles now use full `Style::reset()` so highlight/background does not leak
   across function list rows.
+- Selection no longer tints the cursor row and everything below it permanently:
+  list highlight is baked into each row with solid `theme.bg` / `theme.panel`
+  backgrounds (no `Color::Reset`, no List post-pass highlight style).
 
 ### Added
 
