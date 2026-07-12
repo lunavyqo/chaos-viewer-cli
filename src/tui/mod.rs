@@ -15,7 +15,7 @@ use crossterm::terminal::{
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use reqwest::Client;
 
@@ -50,15 +50,35 @@ impl Screen {
         ]
     }
 
+    /// Short page name (no number).
+    fn name(self) -> &'static str {
+        match self {
+            Screen::Setup => "Setup",
+            Screen::Overview => "Overview",
+            Screen::Priorities => "Priorities",
+            Screen::Detail => "Detail",
+            Screen::Prompt => "Prompt",
+            Screen::Claims => "Claims",
+        }
+    }
+
+    /// Hotkey digit for loaded pages (1–5).
+    fn hotkey(self) -> Option<char> {
+        match self {
+            Screen::Overview => Some('1'),
+            Screen::Priorities => Some('2'),
+            Screen::Detail => Some('3'),
+            Screen::Prompt => Some('4'),
+            Screen::Claims => Some('5'),
+            Screen::Setup => None,
+        }
+    }
+
     /// Tab label with hotkey so navigation is discoverable.
     fn tab_label(self) -> String {
-        match self {
-            Screen::Setup => "Setup".into(),
-            Screen::Overview => "1 Overview".into(),
-            Screen::Priorities => "2 Priorities".into(),
-            Screen::Detail => "3 Detail".into(),
-            Screen::Prompt => "4 Prompt".into(),
-            Screen::Claims => "5 Claims".into(),
+        match self.hotkey() {
+            Some(k) => format!("{k} {}", self.name()),
+            None => self.name().into(),
         }
     }
 }
@@ -986,10 +1006,16 @@ Press ? or esc to close help."#
         // Entire frame solid dark first — no white terminal paper anywhere.
         fill_pane(f, area, &self.theme, self.theme.bg);
 
+        // Header: 2 content rows (title + pages) when loaded → height 4 with borders.
+        let header_h = if self.db.is_some() && self.screen != Screen::Setup {
+            4
+        } else {
+            3
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
+                Constraint::Length(header_h),
                 Constraint::Min(5),
                 Constraint::Length(5), // status + two key rows always visible
             ])
@@ -1009,6 +1035,35 @@ Press ? or esc to close help."#
         if self.show_help {
             self.draw_help_overlay(f, area);
         }
+    }
+
+    /// All 5 pages on one line; current page marked as a reversed chip `[name]`.
+    fn pages_line(&self, bg: Color) -> Line<'static> {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Span::styled(" pages ", paint_on(self.theme.muted, bg)));
+        for (i, screen) in Screen::all_loaded().iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" ", paint_on(self.theme.muted, bg)));
+            }
+            let active = self.screen == *screen;
+            let label = screen.tab_label();
+            if active {
+                spans.push(Span::styled(
+                    format!("[{label}]"),
+                    paint_bold_on(self.theme.bg, self.theme.accent),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    format!(" {label} "),
+                    paint_on(self.theme.muted, bg),
+                ));
+            }
+        }
+        spans.push(Span::styled(
+            "   tab · 1-5 ",
+            paint_on(self.theme.muted, bg),
+        ));
+        Line::from(spans)
     }
 
     fn draw_header(&self, f: &mut Frame, area: Rect) {
@@ -1055,12 +1110,7 @@ Press ? or esc to close help."#
             return;
         }
 
-        let tabs = Screen::all_loaded();
-        let titles: Vec<Line> = tabs
-            .iter()
-            .map(|s| Line::from(Span::styled(s.tab_label(), paint_on(self.theme.muted, bg))))
-            .collect();
-        let selected = tabs.iter().position(|s| *s == self.screen).unwrap_or(0);
+        // Row 1: project stats · Row 2: all pages with current marked
         let header_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Length(1)])
@@ -1074,11 +1124,7 @@ Press ? or esc to close help."#
             header_chunks[0],
         );
         f.render_widget(
-            Tabs::new(titles)
-                .select(selected)
-                .divider(" │ ")
-                .style(paint_on(self.theme.muted, bg))
-                .highlight_style(paint_bold_on(self.theme.accent, bg)),
+            Paragraph::new(self.pages_line(bg)).style(paint_on(self.theme.text, bg)),
             header_chunks[1],
         );
     }
