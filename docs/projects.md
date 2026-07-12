@@ -43,11 +43,12 @@ export CHAOS_PROJECT=sm64ds
 - Startup with no flags resumes **`active_project`** when set.
 - **`p`** anytime opens the **Projects hub** (same as first screen).
 - Hub keys:
-  - **j/k** — select saved project
+  - **type** — source path / URL (always; focuses the input line)
   - **tab** — focus list ↔ freeform source input
-  - **enter** — load selected project, or load typed source
-  - **s** — save current source as a named profile (type id, enter)
-  - **d** — delete selected profile
+  - **j/k** — select saved project (list focused)
+  - **enter** — load typed source, or selected project if list focused
+  - **Shift+s** — save current source as a named profile (type id, enter)
+  - **d** — delete selected profile (list focused)
   - **esc** — back to Overview if something is already loaded
 
 Header shows the active profile id when loaded.
