@@ -27,7 +27,7 @@ use crate::load::{
 use crate::prioritize::{priority_rows, PriorityMode};
 use crate::prompt::{batch_max, build_prompt, PromptOptions};
 use crate::schema::{format_pct, ChaosDb, ChaosFunction, FunctionDetail, ProjectConfig};
-use crate::treemap::{layout_treemap, navigable_functions, step_spatial, LayoutRect, TreemapLeaf};
+use crate::treemap::{build_heatmap_frame, step_sequential, step_spatial_centroids, TreemapLeaf};
 use theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,24 +323,24 @@ impl App {
             ],
             Screen::Heatmap => vec![
                 KeyHint {
-                    key: "←↑↓→/hjkl",
-                    action: "move",
+                    key: "j/k",
+                    action: "next/prev",
+                },
+                KeyHint {
+                    key: "←↑↓→",
+                    action: "spatial",
                 },
                 KeyHint {
                     key: "enter",
-                    action: "open detail",
+                    action: "detail",
                 },
                 KeyHint {
                     key: "z",
-                    action: "zoom module",
+                    action: "zoom",
                 },
                 KeyHint {
                     key: "b",
                     action: "batch",
-                },
-                KeyHint {
-                    key: "c",
-                    action: "copy prompt",
                 },
             ],
             Screen::Priorities => vec![
@@ -427,10 +427,11 @@ OVERVIEW
   esc         leave search
 
 HEATMAP
-  arrows/hjkl move selection on the squarified byte map
+  j / k       next / previous function (stable reading order)
+  arrows      spatial neighbour (by painted centre)
   enter       open function detail
   z           zoom into selected function's module (again to unzoom)
-  green = matched · grey = unmatched · yellow = claimed · cyan = selected
+  braille map green=matched · grey=unmatched · yellow=claim · cyan=selected
 
 PRIORITIES
   n           cycle Nearly / Scaffolded / Biggest
@@ -1048,17 +1049,29 @@ Press ? or esc to close help."#
                     self.priority_list.len()
                 );
             }
-            KeyCode::Up | KeyCode::Char('k') if self.screen == Screen::Heatmap => {
-                self.move_heatmap(0, -1);
+            KeyCode::Char('k') if self.screen == Screen::Heatmap => {
+                self.move_heatmap_seq(-1);
             }
-            KeyCode::Down | KeyCode::Char('j') if self.screen == Screen::Heatmap => {
-                self.move_heatmap(0, 1);
+            KeyCode::Char('j') if self.screen == Screen::Heatmap => {
+                self.move_heatmap_seq(1);
             }
-            KeyCode::Left | KeyCode::Char('h') if self.screen == Screen::Heatmap => {
-                self.move_heatmap(-1, 0);
+            KeyCode::Up if self.screen == Screen::Heatmap => {
+                self.move_heatmap_spatial(0, -1);
             }
-            KeyCode::Right | KeyCode::Char('l') if self.screen == Screen::Heatmap => {
-                self.move_heatmap(1, 0);
+            KeyCode::Down if self.screen == Screen::Heatmap => {
+                self.move_heatmap_spatial(0, 1);
+            }
+            KeyCode::Left if self.screen == Screen::Heatmap => {
+                self.move_heatmap_spatial(-1, 0);
+            }
+            KeyCode::Right if self.screen == Screen::Heatmap => {
+                self.move_heatmap_spatial(1, 0);
+            }
+            KeyCode::Char('h') if self.screen == Screen::Heatmap => {
+                self.move_heatmap_spatial(-1, 0);
+            }
+            KeyCode::Char('l') if self.screen == Screen::Heatmap => {
+                self.move_heatmap_spatial(1, 0);
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1).await,
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1).await,
@@ -1195,16 +1208,16 @@ Press ? or esc to close help."#
         db.functions.iter().map(TreemapLeaf::from).collect()
     }
 
-    /// Layout at the last drawn canvas size (character cells of the map pane).
-    fn heatmap_layout(&self) -> Vec<LayoutRect> {
+    fn heatmap_frame(&self) -> crate::treemap::HeatmapFrame {
         let cols = self.heatmap_cols.max(4);
         let rows = self.heatmap_rows.max(3);
         let leaves = self.heatmap_leaves();
-        layout_treemap(
+        build_heatmap_frame(
             &leaves,
-            cols as f64,
-            rows as f64,
+            cols,
+            rows,
             self.heatmap_zoom.as_deref(),
+            self.selected_id.as_deref(),
         )
     }
 
@@ -1229,35 +1242,54 @@ Press ? or esc to close help."#
     }
 
     fn sync_heatmap_sel_from_selected(&mut self) {
-        let rects = self.heatmap_layout();
-        let nav = navigable_functions(&rects);
-        if nav.is_empty() {
+        let frame = self.heatmap_frame();
+        if frame.nav.is_empty() {
             self.heatmap_sel = 0;
             return;
         }
         if let Some(id) = self.selected_id.as_deref() {
-            if let Some(ni) = nav.iter().position(|&ri| rects[ri].id == id) {
+            if let Some(ni) = frame
+                .nav
+                .iter()
+                .position(|&fi| frame.functions[fi].id == id)
+            {
                 self.heatmap_sel = ni;
                 return;
             }
         }
-        self.heatmap_sel = self.heatmap_sel.min(nav.len() - 1);
-        let id = rects[nav[self.heatmap_sel]].id.clone();
+        self.heatmap_sel = self.heatmap_sel.min(frame.nav.len() - 1);
+        let id = frame.functions[frame.nav[self.heatmap_sel]].id.clone();
         self.selected_id = Some(id);
     }
 
-    fn move_heatmap(&mut self, dir_x: i8, dir_y: i8) {
-        let rects = self.heatmap_layout();
-        let nav = navigable_functions(&rects);
-        if nav.is_empty() {
+    fn apply_heatmap_nav(&mut self, frame: &crate::treemap::HeatmapFrame, nav_i: usize) {
+        if frame.nav.is_empty() {
             return;
         }
-        if self.heatmap_sel >= nav.len() {
-            self.heatmap_sel = 0;
-        }
-        self.heatmap_sel = step_spatial(&rects, &nav, self.heatmap_sel, dir_x, dir_y);
-        self.selected_id = Some(rects[nav[self.heatmap_sel]].id.clone());
+        self.heatmap_sel = nav_i.min(frame.nav.len() - 1);
+        self.selected_id = Some(frame.functions[frame.nav[self.heatmap_sel]].id.clone());
         self.status = self.heatmap_status();
+    }
+
+    /// Stable reading-order step (`j`/`k`).
+    fn move_heatmap_seq(&mut self, delta: isize) {
+        let frame = self.heatmap_frame();
+        if frame.nav.is_empty() {
+            return;
+        }
+        let next = step_sequential(frame.nav.len(), self.heatmap_sel, delta);
+        self.apply_heatmap_nav(&frame, next);
+    }
+
+    /// Spatial neighbour by painted centroid (arrow keys).
+    fn move_heatmap_spatial(&mut self, dir_x: i8, dir_y: i8) {
+        let frame = self.heatmap_frame();
+        if frame.nav.is_empty() {
+            return;
+        }
+        let next =
+            step_spatial_centroids(&frame.functions, &frame.nav, self.heatmap_sel, dir_x, dir_y);
+        self.apply_heatmap_nav(&frame, next);
     }
 
     fn toggle_heatmap_zoom(&mut self) {
@@ -1286,9 +1318,8 @@ Press ? or esc to close help."#
             .as_deref()
             .map(|m| format!("module {m}"))
             .unwrap_or_else(|| "all modules".into());
-        let title = format!(
-            " Heatmap (bytes) · {zoom_label} · green=matched grey=unmatched yellow=claim · z zoom "
-        );
+        let title =
+            format!(" Heatmap braille · {zoom_label} · j/k step · arrows spatial · z zoom ");
         let block = content_block(title, &self.theme, self.theme.border);
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -1316,33 +1347,34 @@ Press ? or esc to close help."#
         self.heatmap_cols = map.width;
         self.heatmap_rows = map.height;
 
-        let leaves: Vec<TreemapLeaf> = self
-            .db
-            .as_ref()
-            .map(|db| db.functions.iter().map(TreemapLeaf::from).collect())
-            .unwrap_or_default();
+        let leaves = self.heatmap_leaves();
         let zoom = self.heatmap_zoom.clone();
-        let rects = layout_treemap(
+        let selected_id = self.selected_id.clone();
+        let frame = build_heatmap_frame(
             &leaves,
-            map.width as f64,
-            map.height as f64,
+            map.width,
+            map.height,
             zoom.as_deref(),
+            selected_id.as_deref(),
         );
-        let nav = navigable_functions(&rects);
 
-        if !nav.is_empty() {
-            if self.heatmap_sel >= nav.len() {
+        if !frame.nav.is_empty() {
+            if self.heatmap_sel >= frame.nav.len() {
                 self.heatmap_sel = 0;
             }
-            // Keep selected_id aligned with the drawn layout.
-            if let Some(want) = self.selected_id.clone() {
-                if let Some(ni) = nav.iter().position(|&ri| rects[ri].id == want) {
+            if let Some(want) = selected_id.as_deref() {
+                if let Some(ni) = frame
+                    .nav
+                    .iter()
+                    .position(|&fi| frame.functions[fi].id == want)
+                {
                     self.heatmap_sel = ni;
                 } else {
-                    self.selected_id = Some(rects[nav[self.heatmap_sel]].id.clone());
+                    self.selected_id =
+                        Some(frame.functions[frame.nav[self.heatmap_sel]].id.clone());
                 }
             } else {
-                self.selected_id = Some(rects[nav[self.heatmap_sel]].id.clone());
+                self.selected_id = Some(frame.functions[frame.nav[self.heatmap_sel]].id.clone());
             }
         }
 
@@ -1360,7 +1392,6 @@ Press ? or esc to close help."#
         let theme_claim = self.theme.claim;
         let theme_batch = self.theme.batch;
 
-        // Legend text before buffer paint (needs db lookup).
         let legend_text = if let Some(f) = selected_id
             .as_ref()
             .and_then(|id| self.db.as_ref().and_then(|db| db.find_by_id(id)))
@@ -1377,8 +1408,14 @@ Press ? or esc to close help."#
                 .position(|x| x == &f.id)
                 .map(|n| format!(" · [B{}]", n + 1))
                 .unwrap_or_default();
+            let px = frame
+                .functions
+                .iter()
+                .find(|rf| rf.id == f.id)
+                .map(|rf| rf.pixel_count)
+                .unwrap_or(0);
             format!(
-                " {}  {}  0x{:x}  {}B  {state}{batch_s} ",
+                " {}  {}  0x{:x}  {}B  {state}{batch_s}  · {px} dots ",
                 f.module, f.name, f.addr, f.size
             )
         } else {
@@ -1387,71 +1424,86 @@ Press ? or esc to close help."#
 
         let buf = f.buffer_mut();
 
-        // Cell paint: module chrome first, then functions (overwrite).
-        for r in rects.iter().filter(|r| r.is_module) {
-            if let Some((cx, cy, cw, ch)) = r.cell_bounds(map.width, map.height) {
-                let style = paint_on(theme_muted, theme_panel);
-                for row in 0..ch {
-                    for col in 0..cw {
-                        let x = map.x + cx + col;
-                        let y = map.y + cy + row;
-                        let cell = &mut buf[(x, y)];
-                        cell.set_symbol(" ");
-                        cell.set_style(style);
-                    }
-                }
-                if let Some(label) = &r.module_label {
-                    if ch >= 1 && cw >= 4 {
-                        let text: String = label.chars().take(cw as usize).collect();
-                        let line =
-                            Line::from(Span::styled(text, paint_bold_on(theme_text, theme_panel)));
-                        buf.set_line(map.x + cx, map.y + cy, &line, cw);
-                    }
-                }
+        // Base dark fill for the map (gaps / borders show as empty braille dots).
+        let base = paint_on(theme_muted, theme_bg);
+        for row in 0..map.height {
+            for col in 0..map.width {
+                let cell = &mut buf[(map.x + col, map.y + row)];
+                cell.set_symbol(" ");
+                cell.set_style(base);
             }
         }
 
-        for r in rects.iter().filter(|r| !r.is_module) {
-            let Some((cx, cy, cw, ch)) = r.cell_bounds(map.width, map.height) else {
-                continue;
-            };
-            let is_sel = selected_id.as_deref() == Some(r.id.as_str());
-            let is_locked = locked_ids.contains(&r.id);
-            let is_batch = batch.iter().any(|x| x == &r.id);
-            let (fg, bg) = if is_sel {
-                (theme_bg, theme_accent)
-            } else if is_locked {
-                (theme_bg, theme_claim)
-            } else if is_batch {
-                (theme_text, theme_batch)
-            } else if r.matched {
-                (theme_bg, theme_matched)
-            } else {
-                (theme_text, theme_unmatched)
-            };
-            let style = if is_sel {
-                paint_bold_on(fg, bg)
-            } else {
-                paint_on(fg, bg)
-            };
-            let sym = if is_sel {
-                "█"
-            } else if r.matched {
-                "▓"
-            } else if is_locked {
-                "▒"
-            } else {
-                "░"
-            };
-            for row in 0..ch {
-                for col in 0..cw {
-                    let x = map.x + cx + col;
-                    let y = map.y + cy + row;
-                    let cell = &mut buf[(x, y)];
-                    cell.set_symbol(sym);
-                    cell.set_style(style);
+        // Braille cells.
+        for row in 0..frame.rows {
+            for col in 0..frame.cols {
+                let Some(bc) = frame.cell(col, row) else {
+                    continue;
+                };
+                let x = map.x + col;
+                let y = map.y + row;
+                let cell = &mut buf[(x, y)];
+
+                if bc.ch == '\u{2800}' && !bc.has_selected {
+                    // Empty gap / border.
+                    cell.set_symbol(" ");
+                    cell.set_style(base);
+                    continue;
                 }
+
+                let (fg, bg, bold) = if bc.has_selected {
+                    (theme_accent, theme_bg, true)
+                } else if let Some(fi) = bc.color_fn {
+                    let rf = &frame.functions[fi];
+                    if locked_ids.contains(&rf.id) {
+                        (theme_claim, theme_bg, false)
+                    } else if batch.iter().any(|b| b == &rf.id) {
+                        (theme_batch, theme_bg, false)
+                    } else if rf.matched {
+                        (theme_matched, theme_bg, false)
+                    } else {
+                        (theme_unmatched, theme_bg, false)
+                    }
+                } else {
+                    (theme_muted, theme_bg, false)
+                };
+
+                let style = if bold {
+                    paint_bold_on(fg, bg)
+                } else {
+                    paint_on(fg, bg)
+                };
+                // Prefer the braille glyph; selected empty mask still shows a marker.
+                let sym = if bc.ch == '\u{2800}' && bc.has_selected {
+                    "◆"
+                } else {
+                    // ratatui set_symbol needs &str; braille is one char.
+                    // Use a tiny stack string via encoding below.
+                    ""
+                };
+                if sym.is_empty() {
+                    let mut tmp = [0u8; 4];
+                    let s = bc.ch.encode_utf8(&mut tmp);
+                    cell.set_symbol(s);
+                } else {
+                    cell.set_symbol(sym);
+                }
+                cell.set_style(style);
             }
+        }
+
+        // Module labels on top (readable chrome).
+        for (cc, cr, label) in &frame.module_labels {
+            if *cr >= map.height || *cc >= map.width {
+                continue;
+            }
+            let max_w = (map.width - cc) as usize;
+            let text: String = label.chars().take(max_w.min(24)).collect();
+            if text.is_empty() {
+                continue;
+            }
+            let line = Line::from(Span::styled(text, paint_bold_on(theme_text, theme_panel)));
+            buf.set_line(map.x + cc, map.y + cr, &line, map.width - cc);
         }
 
         let leg_style = paint_on(theme_text, theme_panel);

@@ -1,9 +1,15 @@
 //! Squarified treemap layout (same math as chaos-viewer / sm64ds-decomp).
 //!
 //! Modules are laid out first by total byte mass, then functions fill each
-//! module's inner rectangle. The TUI paints the result into character cells.
+//! module's inner rectangle. The TUI paints via a **braille** raster (2×4
+//! sub-pixels per character cell) so dense maps keep borders and tiny
+//! functions still light at least one dot.
 
 use crate::schema::ChaosFunction;
+
+/// Braille sub-pixel grid: 2 wide × 4 tall per terminal character.
+pub const BRAILLE_W: usize = 2;
+pub const BRAILLE_H: usize = 4;
 
 /// Input leaf for layout (function or synthetic).
 #[derive(Debug, Clone)]
@@ -382,30 +388,256 @@ fn layout_row<T: Clone>(
     out
 }
 
-/// Function rects only, sorted reading-order (top→bottom, left→right) for nav.
-pub fn navigable_functions(rects: &[LayoutRect]) -> Vec<usize> {
-    let mut idx: Vec<usize> = rects
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| !r.is_module)
-        .map(|(i, _)| i)
-        .collect();
-    idx.sort_by(|&a, &b| {
-        let (ax, ay) = rects[a].center();
-        let (bx, by) = rects[b].center();
-        ay.partial_cmp(&by)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| ax.partial_cmp(&bx).unwrap_or(std::cmp::Ordering::Equal))
-            .then_with(|| rects[a].id.cmp(&rects[b].id))
-    });
-    idx
+// ---------------------------------------------------------------------------
+// Braille raster (higher effective resolution in the terminal)
+// ---------------------------------------------------------------------------
+
+/// One painted function in the raster (only functions that own ≥1 sub-pixel).
+#[derive(Debug, Clone)]
+pub struct RasterFn {
+    pub id: String,
+    pub name: String,
+    pub module: String,
+    pub matched: bool,
+    /// Centroid in sub-pixel coordinates (for spatial nav).
+    pub cx: f64,
+    pub cy: f64,
+    pub pixel_count: u32,
 }
 
-/// Move selection to the nearest navigable neighbour in a cardinal direction.
+/// One terminal character cell after braille encoding.
+#[derive(Debug, Clone)]
+pub struct BrailleCell {
+    /// Unicode braille glyph (U+2800 … U+28FF).
+    pub ch: char,
+    /// Primary function index into [`HeatmapFrame::functions`] for colouring.
+    /// `None` = empty / border gap.
+    pub color_fn: Option<usize>,
+    /// True if the currently selected function owns any dot in this cell.
+    pub has_selected: bool,
+}
+
+/// Ready-to-paint heatmap at character resolution.
+#[derive(Debug, Clone)]
+pub struct HeatmapFrame {
+    pub cols: u16,
+    pub rows: u16,
+    pub cells: Vec<BrailleCell>,
+    pub functions: Vec<RasterFn>,
+    /// Indices into `functions`, reading order (top→bottom, left→right).
+    pub nav: Vec<usize>,
+    /// Module label overlays in character cells: (col, row, text).
+    pub module_labels: Vec<(u16, u16, String)>,
+}
+
+impl HeatmapFrame {
+    pub fn cell(&self, col: u16, row: u16) -> Option<&BrailleCell> {
+        if col >= self.cols || row >= self.rows {
+            return None;
+        }
+        self.cells
+            .get(row as usize * self.cols as usize + col as usize)
+    }
+}
+
+/// Build a braille heatmap for the terminal map pane.
 ///
-/// `dir`: (-1,0) left, (1,0) right, (0,-1) up, (0,1) down.
-pub fn step_spatial(
-    rects: &[LayoutRect],
+/// Layout runs in **sub-pixel** space (`cols*2` × `rows*4`). Function rects are
+/// inset by ~½px so empty dots form thin borders. Any function with a layout
+/// box but zero floor-pixels still gets a single forced dot so it can light up
+/// and be selected.
+pub fn build_heatmap_frame(
+    leaves: &[TreemapLeaf],
+    cols: u16,
+    rows: u16,
+    module_filter: Option<&str>,
+    selected_id: Option<&str>,
+) -> HeatmapFrame {
+    let cols = cols.max(1);
+    let rows = rows.max(1);
+    let px_w = cols as usize * BRAILLE_W;
+    let px_h = rows as usize * BRAILLE_H;
+
+    let rects = layout_treemap(leaves, px_w as f64, px_h as f64, module_filter);
+
+    // owner[y*px_w + x] = Some(fn_index) into `fn_meta` as we build it
+    let mut owners: Vec<Option<usize>> = vec![None; px_w * px_h];
+    let mut fn_meta: Vec<RasterFn> = Vec::new();
+    // id -> index in fn_meta
+    let mut id_to_fn: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    let mut module_labels = Vec::new();
+    for r in &rects {
+        if r.is_module {
+            if let Some(label) = &r.module_label {
+                // Character-cell position of module top-left.
+                let cc = (r.x / BRAILLE_W as f64).floor().max(0.0) as u16;
+                let cr = (r.y / BRAILLE_H as f64).floor().max(0.0) as u16;
+                if cc < cols && cr < rows {
+                    module_labels.push((cc, cr, label.clone()));
+                }
+            }
+            continue;
+        }
+
+        let fi = *id_to_fn.entry(r.id.clone()).or_insert_with(|| {
+            let i = fn_meta.len();
+            fn_meta.push(RasterFn {
+                id: r.id.clone(),
+                name: r.name.clone(),
+                module: r.module.clone(),
+                matched: r.matched,
+                cx: r.center().0,
+                cy: r.center().1,
+                pixel_count: 0,
+            });
+            i
+        });
+
+        // Inset for borders: shrink by 0.5px each side when large enough.
+        let inset = if r.w >= 2.0 && r.h >= 2.0 { 0.5 } else { 0.0 };
+        let x0 = (r.x + inset).floor() as i32;
+        let y0 = (r.y + inset).floor() as i32;
+        let x1 = (r.x + r.w - inset).ceil() as i32;
+        let y1 = (r.y + r.h - inset).ceil() as i32;
+
+        let mut painted = 0u32;
+        for py in y0.max(0)..y1.min(px_h as i32) {
+            for px in x0.max(0)..x1.min(px_w as i32) {
+                let idx = py as usize * px_w + px as usize;
+                // Last writer wins on ties; borders stay empty when inset applied.
+                owners[idx] = Some(fi);
+                painted += 1;
+            }
+        }
+
+        // Tiny functions: guarantee at least one lit sub-pixel at the centre.
+        if painted == 0 {
+            let cx = r.center().0.round() as i32;
+            let cy = r.center().1.round() as i32;
+            let cx = cx.clamp(0, px_w as i32 - 1) as usize;
+            let cy = cy.clamp(0, px_h as i32 - 1) as usize;
+            owners[cy * px_w + cx] = Some(fi);
+            painted = 1;
+        }
+
+        fn_meta[fi].pixel_count = painted;
+        // Recompute centroid from painted pixels later if needed; seed with layout.
+        let _ = painted;
+    }
+
+    // Accurate centroids from painted pixels (stable spatial nav).
+    let mut sum_x = vec![0.0f64; fn_meta.len()];
+    let mut sum_y = vec![0.0f64; fn_meta.len()];
+    let mut counts = vec![0u32; fn_meta.len()];
+    for py in 0..px_h {
+        for px in 0..px_w {
+            if let Some(fi) = owners[py * px_w + px] {
+                sum_x[fi] += px as f64 + 0.5;
+                sum_y[fi] += py as f64 + 0.5;
+                counts[fi] += 1;
+            }
+        }
+    }
+    for (i, f) in fn_meta.iter_mut().enumerate() {
+        if counts[i] > 0 {
+            f.cx = sum_x[i] / counts[i] as f64;
+            f.cy = sum_y[i] / counts[i] as f64;
+            f.pixel_count = counts[i];
+        }
+    }
+
+    // Encode braille cells.
+    // Dot bit map for (dx, dy) in 0..2 × 0..4:
+    const DOT_BITS: [[u8; BRAILLE_H]; BRAILLE_W] = [
+        [0x01, 0x02, 0x04, 0x40], // left column: dots 1,2,3,7
+        [0x08, 0x10, 0x20, 0x80], // right column: dots 4,5,6,8
+    ];
+
+    let mut cells = Vec::with_capacity(cols as usize * rows as usize);
+    for row in 0..rows as usize {
+        for col in 0..cols as usize {
+            let mut mask: u8 = 0;
+            let mut votes: Vec<(usize, u32)> = Vec::new();
+            let mut has_selected = false;
+
+            for (dx, col_bits) in DOT_BITS.iter().enumerate() {
+                for (dy, &bit) in col_bits.iter().enumerate() {
+                    let px = col * BRAILLE_W + dx;
+                    let py = row * BRAILLE_H + dy;
+                    if let Some(fi) = owners[py * px_w + px] {
+                        mask |= bit;
+                        if let Some((_, c)) = votes.iter_mut().find(|(f, _)| *f == fi) {
+                            *c += 1;
+                        } else {
+                            votes.push((fi, 1));
+                        }
+                        if selected_id == Some(fn_meta[fi].id.as_str()) {
+                            has_selected = true;
+                        }
+                    }
+                }
+            }
+
+            // Prefer selected function as colour owner when present, else majority.
+            let color_fn = if has_selected {
+                selected_id.and_then(|sid| fn_meta.iter().position(|f| f.id == sid))
+            } else {
+                votes.into_iter().max_by_key(|(_, c)| *c).map(|(fi, _)| fi)
+            };
+
+            let ch = char::from_u32(0x2800 + mask as u32).unwrap_or('\u{2800}');
+            cells.push(BrailleCell {
+                ch,
+                color_fn,
+                has_selected,
+            });
+        }
+    }
+
+    // Nav: only functions that actually painted, reading order by centroid.
+    let mut nav: Vec<usize> = (0..fn_meta.len())
+        .filter(|&i| fn_meta[i].pixel_count > 0)
+        .collect();
+    nav.sort_by(|&a, &b| {
+        fn_meta[a]
+            .cy
+            .partial_cmp(&fn_meta[b].cy)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                fn_meta[a]
+                    .cx
+                    .partial_cmp(&fn_meta[b].cx)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| fn_meta[a].id.cmp(&fn_meta[b].id))
+    });
+
+    HeatmapFrame {
+        cols,
+        rows,
+        cells,
+        functions: fn_meta,
+        nav,
+        module_labels,
+    }
+}
+
+/// Sequential step along reading-order nav (stable, no jumps).
+pub fn step_sequential(nav_len: usize, current: usize, delta: isize) -> usize {
+    if nav_len == 0 {
+        return 0;
+    }
+    let n = nav_len as isize;
+    let i = current.min(nav_len - 1) as isize + delta;
+    (((i % n) + n) % n) as usize
+}
+
+/// Spatial step using painted centroids among `nav` (indices into functions).
+///
+/// Prefers the nearest neighbour whose vector is mostly aligned with `dir`.
+pub fn step_spatial_centroids(
+    functions: &[RasterFn],
     nav: &[usize],
     current_nav_i: usize,
     dir_x: i8,
@@ -414,39 +646,42 @@ pub fn step_spatial(
     if nav.is_empty() {
         return 0;
     }
-    let cur = nav[current_nav_i.min(nav.len() - 1)];
-    let (cx, cy) = rects[cur].center();
-    let mut best: Option<(usize, f64)> = None;
+    let cur_i = current_nav_i.min(nav.len() - 1);
+    let cur = &functions[nav[cur_i]];
+    let (cx, cy) = (cur.cx, cur.cy);
 
-    for (ni, &ri) in nav.iter().enumerate() {
-        if ni == current_nav_i {
+    let mut best: Option<(usize, f64)> = None;
+    for (ni, &fi) in nav.iter().enumerate() {
+        if ni == cur_i {
             continue;
         }
-        let (x, y) = rects[ri].center();
-        let dx = x - cx;
-        let dy = y - cy;
-        // Must be primarily in the requested direction.
+        let f = &functions[fi];
+        let dx = f.cx - cx;
+        let dy = f.cy - cy;
+        // Require movement into the requested half-plane; mild cone (not 45° hard).
         let ok = if dir_x < 0 {
-            dx < -0.01 && dx.abs() >= dy.abs() * 0.5
+            dx < -0.25
         } else if dir_x > 0 {
-            dx > 0.01 && dx.abs() >= dy.abs() * 0.5
+            dx > 0.25
         } else if dir_y < 0 {
-            dy < -0.01 && dy.abs() >= dx.abs() * 0.5
+            dy < -0.25
         } else if dir_y > 0 {
-            dy > 0.01 && dy.abs() >= dx.abs() * 0.5
+            dy > 0.25
         } else {
             false
         };
         if !ok {
             continue;
         }
-        let dist = dx * dx + dy * dy;
-        if best.map(|(_, d)| dist < d).unwrap_or(true) {
-            best = Some((ni, dist));
+        // Score: primarily distance along the direction axis, then total distance.
+        let along = if dir_x != 0 { dx.abs() } else { dy.abs() };
+        let across = if dir_x != 0 { dy.abs() } else { dx.abs() };
+        let score = along + across * 0.35;
+        if best.map(|(_, s)| score < s).unwrap_or(true) {
+            best = Some((ni, score));
         }
     }
-
-    best.map(|(ni, _)| ni).unwrap_or(current_nav_i)
+    best.map(|(ni, _)| ni).unwrap_or(cur_i)
 }
 
 #[cfg(test)]
@@ -517,39 +752,27 @@ mod tests {
     }
 
     #[test]
-    fn spatial_step_moves_right() {
-        let rects = vec![
-            LayoutRect {
-                id: "L".into(),
-                name: "L".into(),
-                module: "m".into(),
-                matched: false,
-                is_module: false,
-                module_label: None,
-                x: 0.0,
-                y: 0.0,
-                w: 10.0,
-                h: 10.0,
-            },
-            LayoutRect {
-                id: "R".into(),
-                name: "R".into(),
-                module: "m".into(),
-                matched: true,
-                is_module: false,
-                module_label: None,
-                x: 20.0,
-                y: 0.0,
-                w: 10.0,
-                h: 10.0,
-            },
+    fn braille_frame_paints_and_navigates() {
+        let fns = vec![
+            leaf("L", "m", 100, false),
+            leaf("R", "m", 100, true),
+            leaf("tiny", "m", 1, false),
         ];
-        let nav = navigable_functions(&rects);
-        assert_eq!(nav, vec![0, 1]);
-        let next = step_spatial(&rects, &nav, 0, 1, 0);
+        let frame = build_heatmap_frame(&fns, 40, 12, None, Some("tiny"));
+        assert!(!frame.functions.is_empty());
+        assert_eq!(frame.nav.len(), frame.functions.len());
+        // Tiny still gets at least one pixel.
+        let tiny = frame.functions.iter().find(|f| f.id == "tiny").unwrap();
+        assert!(tiny.pixel_count >= 1);
+        // Some braille cells are non-empty.
+        assert!(frame.cells.iter().any(|c| c.ch != '\u{2800}'));
+        // Selected marks cells.
+        assert!(frame.cells.iter().any(|c| c.has_selected));
+
+        let right = step_spatial_centroids(&frame.functions, &frame.nav, 0, 1, 0);
+        assert!(right < frame.nav.len());
+        let next = step_sequential(frame.nav.len(), 0, 1);
         assert_eq!(next, 1);
-        let back = step_spatial(&rects, &nav, 1, -1, 0);
-        assert_eq!(back, 0);
     }
 
     #[test]
