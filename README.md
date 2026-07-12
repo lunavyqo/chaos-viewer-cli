@@ -20,7 +20,8 @@ Private early development. Binary name: `chaos`.
 - Priority lists: nearly done, best scaffolded, biggest unmatched
 - Function detail with optional lazy-loaded module detail chunks
 - Prompt builder (single + batch, max 16) with clipboard copy
-- Optional claims polling (API + `CLAIMS.md` merge, read-only in v1)
+- Optional **pluggable claims** coordination: any HTTP coordinator via
+  `project.claimsApi` (not hardcoded to one host) + `CLAIMS.md` merge
 
 ## Requirements
 
@@ -49,16 +50,31 @@ chaos list --input path/to/chaos-db.json --priority nearly
 chaos prompt --input path/to/chaos-db.json --id 'module:0x02000000'
 ```
 
-Optional claims agent token for prompt footers:
+### Claims (optional, pluggable)
+
+The coordinator URL comes from the atlas (`project.claimsApi`), or `--api`:
 
 ```bash
-export CHAOS_CLAIMS_SESSION=...
-export CHAOS_CLAIMS_HANDLE=your-github-login
+# List locks (API + CLAIMS.md)
+chaos claims list --repo https://github.com/you/your-decomp
+
+# Write path (any coordinator that implements try-lock / renew / release)
+export CHAOS_CLAIMS_API_KEY='…'          # or CHAOS_CLAIMS_SESSION / CHAOS_CLAIMS_KEY
+export CHAOS_CLAIMS_HANDLE='your-name'
+chaos claims try-lock --module arm9 --start 0x2000000 --end 0x2000100 --note 'matching'
+chaos claims renew --id clm_…
+chaos claims release --id clm_…
+chaos claims instructions --repo …
 ```
+
+In the TUI: **`r`** refreshes claims; prompts include the agent lock footer when
+a session is set. See [`docs/claims-api.md`](docs/claims-api.md) for the generic
+contract (so you can run **your own** coordinator or use someone else’s).
 
 ## Data format
 
-See [`docs/schema.md`](docs/schema.md) and upstream
+See [`docs/schema.md`](docs/schema.md), [`docs/claims-api.md`](docs/claims-api.md),
+and upstream
 [ADAPTING.md](https://github.com/tangosdev/chaos-viewer/blob/master/ADAPTING.md).
 
 ## Development
