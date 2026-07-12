@@ -383,8 +383,9 @@ GLOBAL
   1 2 3 4 5 6 Overview · Heatmap · Priorities · Detail · Prompt · Claims
   u           update progress (re-fetch chaos-db; matches can land mid-session)
   r           refresh claims only
-  c           copy current prompt to clipboard
+  c           copy batch prompt to clipboard (no-op if batch empty)
   b           add/remove selected function from batch (max 16)
+              Prompt page uses the batch only (not the Overview cursor)
               batched rows show violet [B1] [B2] … badges in lists
 
 OVERVIEW
@@ -717,8 +718,11 @@ Press ? or esc to close help."#
             .unwrap_or_default()
     }
 
-    /// Rebuild prompt like the web viewer: always attach lazy-fetched detail
-    /// chunks (disasm / draft / pool) for every function in the prompt.
+    /// Rebuild the Prompt page from the **batch only**.
+    ///
+    /// An empty batch never falls back to the Overview cursor — that was
+    /// surprising and made it look like a random function was "in the prompt".
+    /// Add with `b` on Overview/Priorities/Detail first.
     async fn rebuild_prompt(&mut self) {
         let project = self.project();
         let opts = PromptOptions {
@@ -729,18 +733,17 @@ Press ? or esc to close help."#
             return;
         };
 
-        // Collect targets first (owned) so we can await detail fetches.
-        let targets: Vec<ChaosFunction> = if self.batch.is_empty() {
-            self.selected_function().cloned().into_iter().collect()
-        } else {
-            self.batch
-                .iter()
-                .filter_map(|id| db.find_by_id(id).cloned())
-                .collect()
-        };
+        let targets: Vec<ChaosFunction> = self
+            .batch
+            .iter()
+            .filter_map(|id| db.find_by_id(id).cloned())
+            .collect();
 
         if targets.is_empty() {
-            self.prompt_text = "Select a function or add items to the batch.".into();
+            self.prompt_text = "Batch is empty.\n\n\
+Add functions with b on Overview, Priorities, or Detail \
+(max 16), then open Prompt (5) or press c to copy."
+                .into();
             self.prompt_scroll = 0;
             return;
         }
@@ -816,8 +819,17 @@ Press ? or esc to close help."#
     }
 
     fn copy_prompt(&mut self) {
+        if self.batch.is_empty() {
+            self.status = "Nothing to copy · batch is empty (press b to add functions)".into();
+            return;
+        }
         match copy_text(&self.prompt_text) {
-            Ok(()) => self.status = "Prompt copied to clipboard".into(),
+            Ok(()) => {
+                self.status = format!(
+                    "Prompt copied · {} function(s) from batch",
+                    self.batch.len()
+                );
+            }
             Err(e) => {
                 self.error = Some(format!("clipboard: {e}"));
                 self.status = "Copy failed".into();
@@ -1824,12 +1836,12 @@ Press ? or esc to close help."#
         lines.push(String::new());
         if let Some(n) = self.batch_index(&fn_.id) {
             lines.push(format!(
-                "BATCHED  [B{n}]  ·  position {n}/{}  ·  press b to remove  ·  c copy",
+                "BATCHED  [B{n}]  ·  position {n}/{}  ·  press b to remove  ·  c copy batch",
                 self.batch.len()
             ));
         } else {
             lines.push(format!(
-                "not in batch  ·  press b to add ({})  ·  c copy prompt",
+                "not in batch  ·  press b to add ({})  ·  Prompt uses batch only",
                 self.batch_summary()
             ));
         }
@@ -1845,7 +1857,7 @@ Press ? or esc to close help."#
     fn draw_prompt(&self, f: &mut Frame, area: Rect) {
         let bg = self.theme.bg;
         let roster: String = if self.batch.is_empty() {
-            "batch empty — select functions and press b (or copy single selection)".into()
+            "batch empty — press b on Overview/Priorities/Detail to add functions".into()
         } else if let Some(db) = &self.db {
             self.batch
                 .iter()
