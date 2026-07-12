@@ -69,27 +69,36 @@ struct KeyHint {
     action: &'static str,
 }
 
-/// Full style replace (ratatui styles *patch*; incomplete styles leak across list rows).
+/// Full style replace on an explicit background.
+///
+/// Important: never use `Color::Reset` for list row backgrounds. Ratatui List
+/// applies `highlight_style` as a post-pass patch; combined with Reset, visited
+/// rows (and sometimes rows below the cursor) keep the wrong tint. Always paint
+/// solid `theme.bg` / `theme.panel` instead, and bake selection into the row.
+fn paint_on(fg: Color, bg: Color) -> Style {
+    Style::reset().fg(fg).bg(bg)
+}
+
+fn paint_bold_on(fg: Color, bg: Color) -> Style {
+    Style::reset().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
+}
+
+/// Non-list chrome (status bar, help) — Reset is fine outside List highlight.
 fn paint(fg: Color) -> Style {
     Style::reset().fg(fg).bg(Color::Reset)
 }
 
 fn paint_bold(fg: Color) -> Style {
-    Style::reset()
-        .fg(fg)
-        .bg(Color::Reset)
-        .add_modifier(Modifier::BOLD)
-}
-
-fn paint_selected(theme: &Theme) -> Style {
-    Style::reset()
-        .fg(theme.accent)
-        .bg(theme.panel)
-        .add_modifier(Modifier::BOLD)
+    paint_bold_on(fg, Color::Reset)
 }
 
 fn paint_list_base(theme: &Theme) -> Style {
-    Style::reset().fg(theme.text).bg(Color::Reset)
+    Style::reset().fg(theme.text).bg(theme.bg)
+}
+
+/// No-op highlight: selection is drawn inside each ListItem so colors stay stable.
+fn paint_list_highlight_noop() -> Style {
+    Style::new()
 }
 
 fn key_line(theme: &Theme, hints: &[KeyHint]) -> Line<'static> {
@@ -593,14 +602,13 @@ Press ? or esc to close help."#
         self.batch.iter().position(|x| x == id).map(|i| i + 1)
     }
 
-    fn batch_badge_spans(&self, id: &str) -> Vec<Span<'static>> {
+    fn batch_badge_spans(&self, id: &str, bg: Color) -> Vec<Span<'static>> {
         if let Some(n) = self.batch_index(id) {
             vec![Span::styled(
                 format!("[B{n}] "),
-                paint_bold(self.theme.batch),
+                paint_bold_on(self.theme.batch, bg),
             )]
         } else {
-            // Keep column alignment stable when some rows are batched.
             Vec::new()
         }
     }
@@ -1107,21 +1115,40 @@ Press ? or esc to close help."#
             .constraints([Constraint::Percentage(28), Constraint::Percentage(72)])
             .split(area);
 
+        let mod_sel = self.module_state.selected();
         let mod_items: Vec<ListItem> = self
             .module_list
             .iter()
-            .map(|m| {
+            .enumerate()
+            .map(|(i, m)| {
                 let total = db.functions.iter().filter(|f| f.module == *m).count();
                 let matched = db
                     .functions
                     .iter()
                     .filter(|f| f.module == *m && f.matched)
                     .count();
+                let selected = mod_sel == Some(i);
+                let bg = if selected {
+                    self.theme.panel
+                } else {
+                    self.theme.bg
+                };
+                let fg = if selected {
+                    self.theme.accent
+                } else {
+                    self.theme.text
+                };
+                let mark = if selected { "› " } else { "  " };
+                let style = if selected {
+                    paint_bold_on(fg, bg)
+                } else {
+                    paint_on(fg, bg)
+                };
                 ListItem::new(Line::from(Span::styled(
-                    format!("{m}  {matched}/{total}"),
-                    paint(self.theme.text),
+                    format!("{mark}{m}  {matched}/{total}"),
+                    style,
                 )))
-                .style(paint_list_base(&self.theme))
+                .style(paint_on(self.theme.text, bg))
             })
             .collect();
         let mods = List::new(mod_items)
@@ -1129,19 +1156,27 @@ Press ? or esc to close help."#
                 Block::default()
                     .title(" Modules  (h/l) ")
                     .borders(Borders::ALL)
-                    .border_style(paint(self.theme.border))
+                    .border_style(paint_on(self.theme.border, self.theme.bg))
                     .style(paint_list_base(&self.theme)),
             )
             .style(paint_list_base(&self.theme))
-            .highlight_style(paint_selected(&self.theme))
-            .highlight_symbol("› ");
+            .highlight_style(paint_list_highlight_noop())
+            .highlight_symbol("");
         f.render_stateful_widget(mods, cols[0], &mut self.module_state);
 
+        let fn_sel = self.fn_state.selected();
         let fn_items: Vec<ListItem> = self
             .fn_list
             .iter()
-            .map(|&idx| {
+            .enumerate()
+            .map(|(list_i, &idx)| {
                 let f = &db.functions[idx];
+                let selected = fn_sel == Some(list_i);
+                let bg = if selected {
+                    self.theme.panel
+                } else {
+                    self.theme.bg
+                };
                 let badge = if f.matched {
                     "M"
                 } else if self.locked_by.contains_key(&f.id) {
@@ -1156,23 +1191,34 @@ Press ? or esc to close help."#
                 } else if self.locked_by.contains_key(&f.id) {
                     self.theme.claim
                 } else if f.div.is_some() {
-                    self.theme.key // near-miss: warm accent
+                    self.theme.key
                 } else {
                     self.theme.unmatched
                 };
                 let in_batch = self.batch_index(&f.id).is_some();
-                let name_style = if in_batch {
-                    paint_bold(self.theme.batch)
+                let name_fg = if selected {
+                    self.theme.accent
+                } else if in_batch {
+                    self.theme.batch
                 } else {
-                    paint(self.theme.text)
+                    self.theme.text
                 };
-                let mut spans = vec![Span::styled(format!("[{badge}] "), paint(badge_color))];
-                spans.extend(self.batch_badge_spans(&f.id));
+                let name_style = if selected || in_batch {
+                    paint_bold_on(name_fg, bg)
+                } else {
+                    paint_on(name_fg, bg)
+                };
+                let mark = if selected { "› " } else { "  " };
+                let mut spans = vec![
+                    Span::styled(mark.to_string(), paint_on(self.theme.accent, bg)),
+                    Span::styled(format!("[{badge}] "), paint_on(badge_color, bg)),
+                ];
+                spans.extend(self.batch_badge_spans(&f.id, bg));
                 spans.push(Span::styled(
                     format!("{}  0x{:x}  {}B", f.name, f.addr, f.size),
                     name_style,
                 ));
-                ListItem::new(Line::from(spans)).style(paint_list_base(&self.theme))
+                ListItem::new(Line::from(spans)).style(paint_on(self.theme.text, bg))
             })
             .collect();
         let batched_visible = self
@@ -1200,12 +1246,12 @@ Press ? or esc to close help."#
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
-                    .border_style(paint(self.theme.border))
+                    .border_style(paint_on(self.theme.border, self.theme.bg))
                     .style(paint_list_base(&self.theme)),
             )
             .style(paint_list_base(&self.theme))
-            .highlight_style(paint_selected(&self.theme))
-            .highlight_symbol("› ");
+            .highlight_style(paint_list_highlight_noop())
+            .highlight_symbol("");
         f.render_stateful_widget(fns, cols[1], &mut self.fn_state);
     }
 
@@ -1217,28 +1263,48 @@ Press ? or esc to close help."#
             self.priority_list.len(),
             self.batch_summary()
         );
+        let pri_sel = self.priority_state.selected();
         let items: Vec<ListItem> = self
             .priority_list
             .iter()
-            .map(|&idx| {
+            .enumerate()
+            .map(|(list_i, &idx)| {
                 let f = &db.functions[idx];
+                let selected = pri_sel == Some(list_i);
+                let bg = if selected {
+                    self.theme.panel
+                } else {
+                    self.theme.bg
+                };
                 let extra = match self.priority_mode {
                     PriorityMode::Nearly => format!("div={}", f.div.unwrap_or(0)),
                     PriorityMode::Scaffolded => format!("sim={:.2}", f.sim.unwrap_or(0.0)),
                     PriorityMode::Biggest => format!("{}B", f.size),
                 };
                 let in_batch = self.batch_index(&f.id).is_some();
-                let name_style = if in_batch {
-                    paint_bold(self.theme.batch)
+                let name_fg = if selected {
+                    self.theme.accent
+                } else if in_batch {
+                    self.theme.batch
                 } else {
-                    paint(self.theme.text)
+                    self.theme.text
                 };
-                let mut spans = self.batch_badge_spans(&f.id);
+                let name_style = if selected || in_batch {
+                    paint_bold_on(name_fg, bg)
+                } else {
+                    paint_on(name_fg, bg)
+                };
+                let mark = if selected { "› " } else { "  " };
+                let mut spans = vec![Span::styled(
+                    mark.to_string(),
+                    paint_on(self.theme.accent, bg),
+                )];
+                spans.extend(self.batch_badge_spans(&f.id, bg));
                 spans.push(Span::styled(
                     format!("{}  {}  0x{:x}  {extra}", f.module, f.name, f.addr),
                     name_style,
                 ));
-                ListItem::new(Line::from(spans)).style(paint_list_base(&self.theme))
+                ListItem::new(Line::from(spans)).style(paint_on(self.theme.text, bg))
             })
             .collect();
         let list = List::new(items)
@@ -1246,12 +1312,12 @@ Press ? or esc to close help."#
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
-                    .border_style(paint(self.theme.border))
+                    .border_style(paint_on(self.theme.border, self.theme.bg))
                     .style(paint_list_base(&self.theme)),
             )
             .style(paint_list_base(&self.theme))
-            .highlight_style(paint_selected(&self.theme))
-            .highlight_symbol("› ");
+            .highlight_style(paint_list_highlight_noop())
+            .highlight_symbol("");
         f.render_stateful_widget(list, area, &mut self.priority_state);
     }
 
