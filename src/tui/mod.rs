@@ -199,6 +199,8 @@ struct App {
     /// Saving a new profile: type id then Enter.
     saving_project: bool,
     project_id_input: String,
+    /// Pending delete: project id awaiting y/n confirmation.
+    pending_delete_id: Option<String>,
     status: String,
     error: Option<String>,
     db: Option<ChaosDb>,
@@ -274,6 +276,7 @@ impl App {
             setup_list_focus: false,
             saving_project: false,
             project_id_input: String::new(),
+            pending_delete_id: None,
             status: "Type a path/URL then enter · Tab for project list · Shift+s save profile"
                 .into(),
             error: None,
@@ -323,6 +326,18 @@ impl App {
 
     fn global_hints(&self) -> Vec<KeyHint> {
         if self.screen == Screen::Setup {
+            if self.pending_delete_id.is_some() {
+                return vec![
+                    KeyHint {
+                        key: "y",
+                        action: "confirm delete",
+                    },
+                    KeyHint {
+                        key: "n/esc",
+                        action: "cancel",
+                    },
+                ];
+            }
             if self.saving_project {
                 return vec![
                     KeyHint {
@@ -553,7 +568,7 @@ SETUP / PROJECTS
   j / k       select saved project (when list focused)
   enter       load typed source, or selected project if list focused
   Shift+s     save current source as a named project (then type id)
-  d           delete selected saved project (list focused)
+  d           delete selected project (asks y/n first; list focused)
   p           open this hub from any loaded screen
 
 Press ? or esc to close help."#
@@ -1472,6 +1487,32 @@ Add functions with b on Overview or Priorities \
         }
 
         if self.screen == Screen::Setup {
+            if let Some(id) = self.pending_delete_id.clone() {
+                match key {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                        self.pending_delete_id = None;
+                        match self.project_store.remove(&id) {
+                            Ok(true) => {
+                                self.project_sel = self
+                                    .project_sel
+                                    .min(self.project_store.projects.len().saturating_sub(1));
+                                self.status = format!("Removed project '{id}'");
+                                self.error = None;
+                            }
+                            Ok(false) => self.status = "Nothing to remove".into(),
+                            Err(e) => self.error = Some(format!("{e:#}")),
+                        }
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Backspace => {
+                        self.pending_delete_id = None;
+                        self.status = "Delete cancelled".into();
+                    }
+                    _ => {
+                        self.status = format!("Delete '{id}'?  y = yes · n/esc = cancel");
+                    }
+                }
+                return;
+            }
             if self.saving_project {
                 match key {
                     KeyCode::Esc => {
@@ -1543,17 +1584,12 @@ Add functions with b on Overview or Priorities \
                     }
                 }
                 KeyCode::Char('d') if self.setup_list_focus => {
-                    if let Some(p) = self.project_store.projects.get(self.project_sel).cloned() {
-                        match self.project_store.remove(&p.id) {
-                            Ok(true) => {
-                                self.project_sel = self
-                                    .project_sel
-                                    .min(self.project_store.projects.len().saturating_sub(1));
-                                self.status = format!("Removed project '{}'", p.id);
-                            }
-                            Ok(false) => self.status = "Nothing to remove".into(),
-                            Err(e) => self.error = Some(format!("{e:#}")),
-                        }
+                    if let Some(p) = self.project_store.projects.get(self.project_sel) {
+                        self.pending_delete_id = Some(p.id.clone());
+                        self.status = format!(
+                            "Delete project '{}' ({})?  y = yes · n/esc = cancel",
+                            p.id, p.source
+                        );
                     }
                 }
                 // Shift+s = save (plain `s` must type into https://…)
@@ -2285,7 +2321,9 @@ Add functions with b on Overview or Priorities \
 
     fn draw_setup(&self, f: &mut Frame, area: Rect) {
         let bg = self.theme.bg;
-        let title = if self.saving_project {
+        let title = if let Some(id) = &self.pending_delete_id {
+            format!(" Delete '{id}'?  y confirm · n/esc cancel ")
+        } else if self.saving_project {
             format!(" Save project as: {}_ ", self.project_id_input)
         } else {
             format!(
@@ -2375,7 +2413,9 @@ Add functions with b on Overview or Priorities \
         );
 
         // Help strip
-        let help = if self.saving_project {
+        let help = if self.pending_delete_id.is_some() {
+            "y = permanently remove this saved profile · n or esc = keep it"
+        } else if self.saving_project {
             "Enter id · enter save · esc cancel"
         } else {
             "type URL · enter load · Tab list · j/k projects · Shift+s save · d delete · q quit"

@@ -48,7 +48,7 @@ export CHAOS_PROJECT=sm64ds
   - **j/k** — select saved project (list focused)
   - **enter** — load typed source, or selected project if list focused
   - **Shift+s** — save current source as a named profile (type id, enter)
-  - **d** — delete selected profile (list focused)
+  - **d** — delete selected profile (list focused; asks **y/n** first)
   - **esc** — back to Overview if something is already loaded
 
 Header shows the active profile id when loaded.
