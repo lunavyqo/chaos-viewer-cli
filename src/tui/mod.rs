@@ -36,7 +36,6 @@ enum Screen {
     Overview,
     Heatmap,
     Priorities,
-    Detail,
     Prompt,
     Claims,
 }
@@ -84,7 +83,6 @@ impl Screen {
             Screen::Overview,
             Screen::Heatmap,
             Screen::Priorities,
-            Screen::Detail,
             Screen::Prompt,
             Screen::Claims,
         ]
@@ -97,21 +95,19 @@ impl Screen {
             Screen::Overview => "Overview",
             Screen::Heatmap => "Heatmap",
             Screen::Priorities => "Priorities",
-            Screen::Detail => "Detail",
             Screen::Prompt => "Prompt",
             Screen::Claims => "Claims",
         }
     }
 
-    /// Hotkey digit for loaded pages (1–6).
+    /// Hotkey digit for loaded pages (1–5).
     fn hotkey(self) -> Option<char> {
         match self {
             Screen::Overview => Some('1'),
             Screen::Heatmap => Some('2'),
             Screen::Priorities => Some('3'),
-            Screen::Detail => Some('4'),
-            Screen::Prompt => Some('5'),
-            Screen::Claims => Some('6'),
+            Screen::Prompt => Some('4'),
+            Screen::Claims => Some('5'),
             Screen::Setup => None,
         }
     }
@@ -300,7 +296,7 @@ impl App {
         }
         vec![
             KeyHint {
-                key: "tab/1-6",
+                key: "tab/1-5",
                 action: "screens",
             },
             KeyHint {
@@ -337,10 +333,6 @@ impl App {
                     action: "match filter",
                 },
                 KeyHint {
-                    key: "enter",
-                    action: "open detail",
-                },
-                KeyHint {
                     key: "/",
                     action: "search",
                 },
@@ -361,29 +353,11 @@ impl App {
                 },
                 KeyHint {
                     key: "enter",
-                    action: "open detail",
+                    action: "show in overview",
                 },
                 KeyHint {
                     key: "b",
                     action: "batch",
-                },
-                KeyHint {
-                    key: "c",
-                    action: "copy prompt",
-                },
-            ],
-            Screen::Detail => vec![
-                KeyHint {
-                    key: "b",
-                    action: "toggle batch",
-                },
-                KeyHint {
-                    key: "c",
-                    action: "copy prompt",
-                },
-                KeyHint {
-                    key: "5",
-                    action: "prompt view",
                 },
             ],
             Screen::Prompt => vec![
@@ -419,7 +393,7 @@ GLOBAL
   ?           toggle this help
   q           quit
   tab / S-tab next / previous screen
-  1 2 3 4 5 6 Overview · Heatmap · Priorities · Detail · Prompt · Claims
+  1 2 3 4 5   Overview · Heatmap · Priorities · Prompt · Claims
   u           update progress (re-fetch chaos-db; matches can land mid-session)
   r           refresh claims only
   c           copy batch prompt to clipboard (no-op if batch empty)
@@ -428,12 +402,9 @@ GLOBAL
               batched rows show violet [B1] [B2] … badges in lists
 
 OVERVIEW
-  j / k       next / previous function  (also ↑ ↓)
-  h / l       previous / next module    (also ← →)
-  m           cycle match filter: all → unmatched → matched
-  enter       open function detail
-  /           search (filter by name, module, id)
-  esc         leave search
+  top: modules (h/l) · functions (j/k) · m match filter · / search
+  bottom: detail pane for the selected function (loads as you move)
+  b           toggle batch for selected function
 
 HEATMAP
   view-only byte map (select a function on Overview / Priorities first)
@@ -442,9 +413,9 @@ HEATMAP
 PRIORITIES
   n           cycle Nearly / Scaffolded / Biggest
   j / k       move in ranked list
-  enter       open selected function
+  enter       jump to Overview with that function selected
 
-DETAIL / PROMPT
+PROMPT
   j / k       scroll prompt text
   pgup/pgdn   scroll prompt by page
 
@@ -535,11 +506,9 @@ Press ? or esc to close help."#
         if prev_screen != Screen::Setup {
             self.screen = prev_screen;
         }
-        if matches!(self.screen, Screen::Detail | Screen::Prompt) {
-            self.load_selected_detail().await;
-        } else {
-            self.rebuild_prompt().await;
-        }
+        // Refresh detail chunks for the selected function (Overview bottom pane)
+        // and rebuild the batch prompt text.
+        self.load_selected_detail().await;
 
         if let Some(db) = &self.db {
             self.status = format!(
@@ -798,8 +767,8 @@ Press ? or esc to close help."#
 
         if targets.is_empty() {
             self.prompt_text = "Batch is empty.\n\n\
-Add functions with b on Overview, Priorities, or Detail \
-(max 16), then open Prompt (5) or press c to copy."
+Add functions with b on Overview or Priorities \
+(max 16), then open Prompt (4) or press c to copy."
                 .into();
             self.prompt_scroll = 0;
             return;
@@ -1029,16 +998,11 @@ Add functions with b on Overview, Priorities, or Detail \
                 self.status = format!("Priorities · {}", self.priority_mode.label());
             }
             KeyCode::Char('4') => {
-                self.screen = Screen::Detail;
-                self.load_selected_detail().await;
-                self.status = "Detail".into();
-            }
-            KeyCode::Char('5') => {
                 self.screen = Screen::Prompt;
                 self.rebuild_prompt().await;
                 self.status = "Prompt".into();
             }
-            KeyCode::Char('6') => {
+            KeyCode::Char('5') => {
                 self.screen = Screen::Claims;
                 self.status = format!("Claims · {}", self.claims_status);
             }
@@ -1082,6 +1046,7 @@ Add functions with b on Overview, Priorities, or Detail \
             KeyCode::Char('m') if self.screen == Screen::Overview => {
                 self.match_filter = self.match_filter.cycle();
                 self.rebuild_functions();
+                self.load_selected_detail().await;
                 self.status = format!(
                     "Overview filter: {} ({} functions)",
                     self.match_filter.label(),
@@ -1093,26 +1058,30 @@ Add functions with b on Overview, Priorities, or Detail \
             KeyCode::Left | KeyCode::Char('h') if self.screen == Screen::Overview => {
                 self.move_module(-1);
                 self.rebuild_functions();
+                self.load_selected_detail().await;
             }
             KeyCode::Right | KeyCode::Char('l') if self.screen == Screen::Overview => {
                 self.move_module(1);
                 self.rebuild_functions();
+                self.load_selected_detail().await;
             }
             KeyCode::Enter => {
                 if self.screen == Screen::Priorities {
                     if let Some(&idx) = self.priority_list.get(self.priority_sel) {
                         if let Some(db) = &self.db {
-                            self.selected_id = Some(db.functions[idx].id.clone());
-                            self.screen = Screen::Detail;
+                            let id = db.functions[idx].id.clone();
+                            let module = db.functions[idx].module.clone();
+                            self.selected_id = Some(id);
+                            // Jump to Overview so the bottom detail pane is visible.
+                            if let Some(i) = self.module_list.iter().position(|m| m == &module) {
+                                self.module_sel = i;
+                            }
+                            self.rebuild_functions();
+                            self.screen = Screen::Overview;
                             self.load_selected_detail().await;
-                            self.status = "Opened from priorities".into();
+                            self.status = "Overview · from priorities".into();
                         }
                     }
-                } else if self.screen == Screen::Overview {
-                    self.sync_selection_from_fn();
-                    self.screen = Screen::Detail;
-                    self.load_selected_detail().await;
-                    self.status = "Opened function detail".into();
                 }
             }
             KeyCode::PageUp if self.screen == Screen::Prompt => {
@@ -1143,10 +1112,6 @@ Add functions with b on Overview, Priorities, or Detail \
     async fn on_screen_enter(&mut self) {
         // Short status only — key hints live in the controls bar below.
         match self.screen {
-            Screen::Detail => {
-                self.load_selected_detail().await;
-                self.status = "Detail".into();
-            }
             Screen::Prompt => {
                 self.rebuild_prompt().await;
                 self.status = "Prompt".into();
@@ -1162,6 +1127,7 @@ Add functions with b on Overview, Priorities, or Detail \
                 self.status = format!("Claims · {}", self.claims_status);
             }
             Screen::Overview => {
+                self.load_selected_detail().await;
                 self.status = "Overview".into();
             }
             Screen::Setup => {}
@@ -1189,6 +1155,7 @@ Add functions with b on Overview, Priorities, or Detail \
                 let i = ((i % n) + n) % n;
                 self.fn_sel = i as usize;
                 self.sync_selection_from_fn();
+                self.load_selected_detail().await;
             }
             Screen::Priorities => {
                 if self.priority_list.is_empty() {
@@ -1401,7 +1368,6 @@ Add functions with b on Overview, Priorities, or Detail \
             Screen::Overview => self.draw_overview(f, chunks[1]),
             Screen::Heatmap => self.draw_heatmap(f, chunks[1]),
             Screen::Priorities => self.draw_priorities(f, chunks[1]),
-            Screen::Detail => self.draw_detail(f, chunks[1]),
             Screen::Prompt => self.draw_prompt(f, chunks[1]),
             Screen::Claims => self.draw_claims(f, chunks[1]),
         }
@@ -1617,10 +1583,16 @@ Add functions with b on Overview, Priorities, or Detail \
 
     fn draw_overview(&mut self, f: &mut Frame, area: Rect) {
         let Some(db) = &self.db else { return };
+
+        // Top: modules | functions. Bottom: detail spanning full width.
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(area);
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(28), Constraint::Percentage(72)])
-            .split(area);
+            .split(rows[0]);
 
         // Module lines
         let mod_height = cols[0].height.saturating_sub(2) as usize;
@@ -1742,20 +1714,23 @@ Add functions with b on Overview, Priorities, or Detail \
         let filter = self.match_filter.label();
         let title = if self.search.is_empty() {
             format!(
-                " Functions ({}) · {filter} · batch {} ({} here) · m filter · j/k enter / b ",
+                " Functions ({}) · {filter} · batch {} ({} here) · m filter · j/k / b ",
                 self.fn_list.len(),
                 self.batch_summary(),
                 batched_visible
             )
         } else {
             format!(
-                " Functions ({}) · {filter} · /{} · batch {} · m · enter done ",
+                " Functions ({}) · {filter} · /{} · batch {} · m · esc done ",
                 self.fn_list.len(),
                 self.search,
                 self.batch_summary()
             )
         };
         Self::draw_line_list(f, cols[1], title, &self.theme, &fn_lines, self.fn_offset);
+
+        // Detail strip under both lists.
+        self.draw_detail_pane(f, rows[1]);
     }
 
     fn draw_priorities(&mut self, f: &mut Frame, area: Rect) {
@@ -1819,15 +1794,16 @@ Add functions with b on Overview, Priorities, or Detail \
         Self::draw_line_list(f, area, title, &self.theme, &lines, self.priority_offset);
     }
 
-    fn draw_detail(&self, f: &mut Frame, area: Rect) {
+    /// Detail panel used under Overview (modules + functions).
+    fn draw_detail_pane(&self, f: &mut Frame, area: Rect) {
         let bg = self.theme.bg;
         let Some(fn_) = self.selected_function() else {
-            let block = content_block(" Function detail ", &self.theme, self.theme.border);
+            let block = content_block(" Detail ", &self.theme, self.theme.border);
             let inner = block.inner(area);
             f.render_widget(block, area);
             fill_pane(f, inner, &self.theme, bg);
             f.render_widget(
-                Paragraph::new("No function selected. Pick one in Overview or Priorities.")
+                Paragraph::new("No function selected. Move with j/k in the list above.")
                     .style(paint_on(self.theme.muted, bg)),
                 inner,
             );
@@ -1835,9 +1811,9 @@ Add functions with b on Overview, Priorities, or Detail \
         };
 
         let title = if let Some(n) = self.batch_index(&fn_.id) {
-            format!(" Function detail  ·  BATCHED [B{n}] ")
+            format!(" Detail  ·  BATCHED [B{n}]  ·  b toggle batch ")
         } else {
-            " Function detail ".into()
+            " Detail  ·  b batch ".into()
         };
         let border = if self.batch_index(&fn_.id).is_some() {
             self.theme.batch
@@ -1924,7 +1900,7 @@ Add functions with b on Overview, Priorities, or Detail \
     fn draw_prompt(&self, f: &mut Frame, area: Rect) {
         let bg = self.theme.bg;
         let roster: String = if self.batch.is_empty() {
-            "batch empty — press b on Overview/Priorities/Detail to add functions".into()
+            "batch empty — press b on Overview or Priorities to add functions".into()
         } else if let Some(db) = &self.db {
             self.batch
                 .iter()

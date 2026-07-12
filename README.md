@@ -16,13 +16,12 @@ Private early development. Binary name: `chaos`.
 
 - Load atlas data from a local path, raw JSON URL, or GitHub repo (probes the same
   locations as the web viewer)
-- Overview stats and searchable module / function lists, with **`m`** to show
-  all / unmatched only / matched only
+- Overview: modules + functions on top, **detail pane** underneath; **`m`**
+  filters all / unmatched only / matched only
 - **Heatmap** tab: view-only squarified byte treemap (same layout math as
   chaos-viewer) — green matched / grey unmatched / yellow claimed
 - Priority lists: nearly done, best scaffolded, biggest unmatched
-- Function detail with optional lazy-loaded module detail chunks
-- Prompt builder (single + batch, max 16) with clipboard copy
+- Prompt builder (batch, max 16) with clipboard copy
 - Optional **pluggable claims** coordination: any HTTP coordinator via
   `project.claimsApi` (not hardcoded to one host) + `CLAIMS.md` merge
 
