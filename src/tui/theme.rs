@@ -15,6 +15,7 @@ pub struct Theme {
     pub matched: Color,
     pub unmatched: Color,
     pub claim: Color,
+    pub batch: Color,
 }
 
 impl Default for Theme {
@@ -30,7 +31,8 @@ impl Default for Theme {
             error: Color::Rgb(255, 120, 120),
             matched: Color::Rgb(80, 200, 140),
             unmatched: Color::Rgb(150, 150, 160),
-            claim: Color::Rgb(230, 190, 80), // gold locks
+            claim: Color::Rgb(230, 190, 80),  // gold locks
+            batch: Color::Rgb(190, 150, 255), // violet = in prompt batch
         }
     }
 }
