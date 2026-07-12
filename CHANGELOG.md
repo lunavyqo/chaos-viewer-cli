@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Overview j/k lag**: list navigation no longer rebuilds the batch prompt on
+  every step; detail loads from the in-memory module cache when possible;
+  module match counts are precomputed; detail text is cached; rapid j/k are
+  coalesced per frame.
 - Overview detail scroll no longer accepts offsets past the last page (`]` /
   PgDn stop when the end of the text is already visible).
 

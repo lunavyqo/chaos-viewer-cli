@@ -121,6 +121,14 @@ impl DetailCache {
     pub fn base(&self) -> &str {
         &self.base
     }
+
+    /// If this module chunk is already in memory, return `Some(detail_or_none)`.
+    /// If the module has never been loaded, return `None` (caller should fetch).
+    pub fn get_if_module_loaded(&self, module: &str, name: &str) -> Option<Option<FunctionDetail>> {
+        let guard = self.inner.lock().expect("detail cache lock");
+        let mod_map = guard.get(module)?;
+        Some(mod_map.get(name).cloned())
+    }
 }
 
 pub async fn load_function_detail(

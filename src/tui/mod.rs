@@ -198,11 +198,15 @@ struct App {
     search: String,
     searching: bool,
     module_list: Vec<String>,
+    /// Parallel to `module_list`: (matched_count, total_count) — precomputed once per load.
+    module_counts: Vec<(usize, usize)>,
     module_sel: usize,
     module_offset: usize,
     fn_list: Vec<usize>,
     fn_sel: usize,
     fn_offset: usize,
+    /// `function.id` → index in `db.functions` (avoids O(n) scans on every key).
+    id_index: HashMap<String, usize>,
     match_filter: MatchFilter,
     priority_mode: PriorityMode,
     priority_list: Vec<usize>,
@@ -216,6 +220,9 @@ struct App {
     detail_scroll: u16,
     /// Inner height of the detail pane from the last draw (for scroll clamp).
     detail_view_h: u16,
+    /// Cached detail-pane text; rebuilt only when selection/detail/batch changes.
+    detail_lines_cache: Vec<String>,
+    detail_lines_key: String,
     prompt_text: String,
     claims_session: Option<ClaimsSession>,
     show_help: bool,
@@ -244,11 +251,13 @@ impl App {
             search: String::new(),
             searching: false,
             module_list: Vec::new(),
+            module_counts: Vec::new(),
             module_sel: 0,
             module_offset: 0,
             fn_list: Vec::new(),
             fn_sel: 0,
             fn_offset: 0,
+            id_index: HashMap::new(),
             match_filter: MatchFilter::All,
             priority_mode: PriorityMode::Nearly,
             priority_list: Vec::new(),
@@ -260,6 +269,8 @@ impl App {
             prompt_scroll: 0,
             detail_scroll: 0,
             detail_view_h: 8,
+            detail_lines_cache: Vec::new(),
+            detail_lines_key: String::new(),
             prompt_text: String::new(),
             claims_session,
             show_help: false,
@@ -518,9 +529,11 @@ Press ? or esc to close help."#
         if prev_screen != Screen::Setup {
             self.screen = prev_screen;
         }
-        // Refresh detail chunks for the selected function (Overview bottom pane)
-        // and rebuild the batch prompt text.
-        self.load_selected_detail().await;
+        // Refresh detail for the selected function; rebuild prompt only here
+        // (not on every list move).
+        self.ensure_selected_detail().await;
+        self.rebuild_prompt().await;
+        self.invalidate_detail_lines();
 
         if let Some(db) = &self.db {
             self.status = format!(
@@ -538,13 +551,21 @@ Press ? or esc to close help."#
     async fn apply_db(&mut self, db: ChaosDb, reset_to_overview: bool) {
         self.refresh_claims(&db).await;
         self.rebuild_modules(&db);
+        self.id_index = db
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.id.clone(), i))
+            .collect();
         self.db = Some(db);
         if reset_to_overview {
             self.screen = Screen::Overview;
         }
         self.rebuild_functions();
         self.rebuild_priorities();
+        self.ensure_selected_detail().await;
         self.rebuild_prompt().await;
+        self.invalidate_detail_lines();
         if let Some(db) = &self.db {
             self.status = format!(
                 "Loaded {} · {}/{} fn ({:.2}%)",
@@ -593,6 +614,19 @@ Press ? or esc to close help."#
         let mut mods: Vec<String> = db.functions.iter().map(|f| f.module.clone()).collect();
         mods.sort();
         mods.dedup();
+        // One linear pass for counts instead of O(modules × functions) every frame.
+        let mut totals: HashMap<String, (usize, usize)> = HashMap::new();
+        for f in &db.functions {
+            let e = totals.entry(f.module.clone()).or_insert((0, 0));
+            e.1 += 1;
+            if f.matched {
+                e.0 += 1;
+            }
+        }
+        self.module_counts = mods
+            .iter()
+            .map(|m| totals.get(m).copied().unwrap_or((0, 0)))
+            .collect();
         self.module_list = mods;
         self.module_sel = 0;
         self.module_offset = 0;
@@ -728,8 +762,33 @@ Press ? or esc to close help."#
         }
     }
 
-    /// Text lines shown in the Overview detail pane (full draft/disasm for scrolling).
-    fn detail_pane_lines(&self) -> Vec<String> {
+    fn invalidate_detail_lines(&mut self) {
+        self.detail_lines_key.clear();
+        self.detail_lines_cache.clear();
+    }
+
+    fn detail_cache_key(&self) -> String {
+        let id = self.selected_id.as_deref().unwrap_or("");
+        let has_det = self.detail.is_some();
+        let batch_n = self.batch_index(id).unwrap_or(0);
+        let batch_len = self.batch.len();
+        let locked = self.locked_by.get(id).map(|s| s.as_str()).unwrap_or("");
+        format!("{id}|d={has_det}|b={batch_n}/{batch_len}|L={locked}")
+    }
+
+    /// Cached until selection / detail / batch membership changes.
+    fn detail_pane_lines(&mut self) -> &Vec<String> {
+        let key = self.detail_cache_key();
+        if self.detail_lines_key == key && !self.detail_lines_cache.is_empty() {
+            return &self.detail_lines_cache;
+        }
+        let lines = self.build_detail_pane_lines();
+        self.detail_lines_key = key;
+        self.detail_lines_cache = lines;
+        &self.detail_lines_cache
+    }
+
+    fn build_detail_pane_lines(&self) -> Vec<String> {
         let Some(fn_) = self.selected_function() else {
             return vec!["No function selected. Move with j/k in the list above.".into()];
         };
@@ -794,7 +853,7 @@ Press ? or esc to close help."#
             }
         } else {
             lines.push(String::new());
-            lines.push("(no detail chunk loaded for this module)".into());
+            lines.push("(detail loading… or no chunk for this module)".into());
         }
         lines.push(String::new());
         if let Some(n) = self.batch_index(&fn_.id) {
@@ -812,7 +871,7 @@ Press ? or esc to close help."#
     }
 
     /// Max scroll so the last page still fills the viewport (not past the last line).
-    fn detail_max_scroll(&self) -> u16 {
+    fn detail_max_scroll(&mut self) -> u16 {
         let total = self.detail_pane_lines().len();
         let view = self.detail_view_h.max(1) as usize;
         total.saturating_sub(view) as u16
@@ -825,33 +884,70 @@ Press ? or esc to close help."#
         } else {
             self.detail_scroll = self.detail_scroll.saturating_add(delta as u16).min(max);
         }
-        // Always re-clamp (covers resize / content shrink).
-        self.detail_scroll = self.detail_scroll.min(self.detail_max_scroll());
+        let max = self.detail_max_scroll();
+        self.detail_scroll = self.detail_scroll.min(max);
     }
 
     fn selected_function(&self) -> Option<&ChaosFunction> {
         let db = self.db.as_ref()?;
         let id = self.selected_id.as_ref()?;
+        if let Some(&idx) = self.id_index.get(id) {
+            return db.functions.get(idx);
+        }
         db.find_by_id(id)
+    }
+
+    /// Fast path: use in-memory module chunk if present. No network.
+    fn apply_detail_from_cache(&mut self) -> bool {
+        let (module, name) = {
+            let Some(f) = self.selected_function() else {
+                self.detail = None;
+                self.invalidate_detail_lines();
+                return true;
+            };
+            (f.module.clone(), f.name.clone())
+        };
+        let Some(cache) = &self.detail_cache else {
+            self.detail = None;
+            self.invalidate_detail_lines();
+            return true;
+        };
+        if let Some(det) = cache.get_if_module_loaded(&module, &name) {
+            self.detail = det;
+            self.invalidate_detail_lines();
+            return true;
+        }
+        false
+    }
+
+    /// Load detail for the current selection. Uses cache when possible (no await I/O).
+    /// Does **not** rebuild the batch prompt (that made j/k laggy).
+    async fn ensure_selected_detail(&mut self) {
+        if self.apply_detail_from_cache() {
+            return;
+        }
+        self.load_selected_detail().await;
     }
 
     async fn load_selected_detail(&mut self) {
         let (module, name) = {
             let Some(f) = self.selected_function() else {
                 self.detail = None;
+                self.invalidate_detail_lines();
                 return;
             };
             (f.module.clone(), f.name.clone())
         };
         let Some(cache) = &self.detail_cache else {
             self.detail = None;
+            self.invalidate_detail_lines();
             return;
         };
         match load_function_detail(&self.client, cache, &module, &name).await {
             Ok(d) => self.detail = d,
             Err(_) => self.detail = None,
         }
-        self.rebuild_prompt().await;
+        self.invalidate_detail_lines();
     }
 
     fn project(&self) -> ProjectConfig {
@@ -879,7 +975,13 @@ Press ? or esc to close help."#
         let targets: Vec<ChaosFunction> = self
             .batch
             .iter()
-            .filter_map(|id| db.find_by_id(id).cloned())
+            .filter_map(|id| {
+                self.id_index
+                    .get(id)
+                    .and_then(|&i| db.functions.get(i))
+                    .or_else(|| db.find_by_id(id))
+                    .cloned()
+            })
             .collect();
 
         if targets.is_empty() {
@@ -938,6 +1040,7 @@ Add functions with b on Overview or Priorities \
         } else {
             self.status = format!("Batch full ({}/{})", self.batch.len(), batch_max());
         }
+        self.invalidate_detail_lines();
         self.rebuild_prompt().await;
     }
 
@@ -1163,7 +1266,7 @@ Add functions with b on Overview or Priorities \
             KeyCode::Char('m') if self.screen == Screen::Overview => {
                 self.match_filter = self.match_filter.cycle();
                 self.rebuild_functions();
-                self.load_selected_detail().await;
+                self.ensure_selected_detail().await;
                 self.status = format!(
                     "Overview filter: {} ({} functions)",
                     self.match_filter.label(),
@@ -1175,12 +1278,12 @@ Add functions with b on Overview or Priorities \
             KeyCode::Left | KeyCode::Char('h') if self.screen == Screen::Overview => {
                 self.move_module(-1);
                 self.rebuild_functions();
-                self.load_selected_detail().await;
+                self.ensure_selected_detail().await;
             }
             KeyCode::Right | KeyCode::Char('l') if self.screen == Screen::Overview => {
                 self.move_module(1);
                 self.rebuild_functions();
-                self.load_selected_detail().await;
+                self.ensure_selected_detail().await;
             }
             KeyCode::Enter => {
                 if self.screen == Screen::Priorities {
@@ -1196,7 +1299,7 @@ Add functions with b on Overview or Priorities \
                             }
                             self.rebuild_functions();
                             self.screen = Screen::Overview;
-                            self.load_selected_detail().await;
+                            self.ensure_selected_detail().await;
                             self.status = "Overview · from priorities".into();
                         }
                     }
@@ -1257,7 +1360,7 @@ Add functions with b on Overview or Priorities \
                 self.status = format!("Claims · {}", self.claims_status);
             }
             Screen::Overview => {
-                self.load_selected_detail().await;
+                self.ensure_selected_detail().await;
                 self.status = "Overview".into();
             }
             Screen::Setup => {}
@@ -1285,7 +1388,7 @@ Add functions with b on Overview or Priorities \
                 let i = ((i % n) + n) % n;
                 self.fn_sel = i as usize;
                 self.sync_selection_from_fn();
-                self.load_selected_detail().await;
+                self.ensure_selected_detail().await;
             }
             Screen::Priorities => {
                 if self.priority_list.is_empty() {
@@ -1737,12 +1840,7 @@ Add functions with b on Overview or Priorities \
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                let total = db.functions.iter().filter(|f| f.module == *m).count();
-                let matched = db
-                    .functions
-                    .iter()
-                    .filter(|f| f.module == *m && f.matched)
-                    .count();
+                let (matched, total) = self.module_counts.get(i).copied().unwrap_or((0, 0));
                 let selected = i == self.module_sel;
                 let bg = if selected {
                     self.theme.panel
@@ -1927,8 +2025,8 @@ Add functions with b on Overview or Priorities \
     /// Detail panel used under Overview (modules + functions).
     fn draw_detail_pane(&mut self, f: &mut Frame, area: Rect) {
         let bg = self.theme.bg;
-        let lines = self.detail_pane_lines();
-        let total = lines.len();
+        let body = self.detail_pane_lines().join("\n");
+        let total = self.detail_lines_cache.len();
         let view_h = area.height.saturating_sub(2).max(1); // border → inner rows
         self.detail_view_h = view_h;
         let max_scroll = total.saturating_sub(view_h as usize);
@@ -1969,7 +2067,6 @@ Add functions with b on Overview or Priorities \
         f.render_widget(block, area);
         fill_pane(f, inner, &self.theme, bg);
 
-        let body = lines.join("\n");
         let style = if has_fn {
             paint_on(self.theme.text, bg)
         } else {
@@ -2114,22 +2211,57 @@ async fn run_loop(
 ) -> Result<()> {
     loop {
         terminal.draw(|f| app.draw(f))?;
-        if event::poll(Duration::from_millis(50))? {
-            // Drain the event queue so rapid keypresses aren't dropped.
+        if event::poll(Duration::from_millis(16))? {
+            // Drain the queue. Coalesce rapid j/k/↑/↓ on list screens so holding
+            // a key only pays one selection update (+ one detail load) per frame.
+            let mut nav_delta: isize = 0;
+            let mut other_keys: Vec<KeyEvent> = Vec::new();
             while event::poll(Duration::from_millis(0))? {
                 match event::read()? {
                     Event::Key(key) => {
-                        // Windows emits Press+Release; some terminals only emit
-                        // Repeat. Accept everything except Release.
-                        if key.kind != KeyEventKind::Release {
-                            app.on_key(key).await;
+                        if key.kind == KeyEventKind::Release {
+                            continue;
+                        }
+                        let code = match key.code {
+                            KeyCode::Char(c) => KeyCode::Char(c.to_ascii_lowercase()),
+                            other => other,
+                        };
+                        let coalescable = matches!(
+                            app.screen,
+                            Screen::Overview | Screen::Priorities | Screen::Prompt
+                        ) && !app.searching
+                            && !app.show_help
+                            && matches!(
+                                code,
+                                KeyCode::Char('j')
+                                    | KeyCode::Char('k')
+                                    | KeyCode::Up
+                                    | KeyCode::Down
+                            );
+                        if coalescable {
+                            match code {
+                                KeyCode::Char('j') | KeyCode::Down => nav_delta += 1,
+                                KeyCode::Char('k') | KeyCode::Up => nav_delta -= 1,
+                                _ => {}
+                            }
+                        } else {
+                            // Flush pending nav before other keys so order stays sane.
+                            if nav_delta != 0 {
+                                app.move_sel(nav_delta).await;
+                                nav_delta = 0;
+                            }
+                            other_keys.push(key);
                         }
                     }
-                    Event::Resize(_, _) => {
-                        // Redraw on next loop iteration.
-                    }
+                    Event::Resize(_, _) => {}
                     _ => {}
                 }
+            }
+            if nav_delta != 0 {
+                app.move_sel(nav_delta).await;
+            }
+            for key in other_keys {
+                app.on_key(key).await;
             }
         }
         if app.should_quit {
