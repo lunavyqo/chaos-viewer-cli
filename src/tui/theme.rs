@@ -1,4 +1,8 @@
-//! Dark agent-CLI inspired palette.
+//! Terminal-safe palette.
+//!
+//! Use classic ANSI named colours (not `Color::Rgb`). macOS 12 Terminal.app
+//! mishandles 24-bit truecolour SGR sequences, which showed up as “everything
+//! from the cursor downward stays tinted”.
 
 use ratatui::style::Color;
 
@@ -21,18 +25,18 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Self {
         Self {
-            bg: Color::Rgb(18, 18, 22),
-            panel: Color::Rgb(28, 28, 36),
-            border: Color::Rgb(55, 55, 70),
-            text: Color::Rgb(230, 230, 235),
-            muted: Color::Rgb(140, 140, 155),
-            accent: Color::Rgb(120, 200, 255), // soft cyan
-            key: Color::Rgb(255, 200, 120),    // keycaps stand out
-            error: Color::Rgb(255, 120, 120),
-            matched: Color::Rgb(80, 200, 140),
-            unmatched: Color::Rgb(150, 150, 160),
-            claim: Color::Rgb(230, 190, 80),  // gold locks
-            batch: Color::Rgb(190, 150, 255), // violet = in prompt batch
+            bg: Color::Black,
+            panel: Color::DarkGray,
+            border: Color::DarkGray,
+            text: Color::Gray,
+            muted: Color::DarkGray,
+            accent: Color::Cyan,
+            key: Color::Yellow,
+            error: Color::LightRed,
+            matched: Color::Green,
+            unmatched: Color::DarkGray,
+            claim: Color::Yellow,
+            batch: Color::Magenta,
         }
     }
 }
