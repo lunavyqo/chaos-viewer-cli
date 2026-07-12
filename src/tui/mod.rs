@@ -214,8 +214,6 @@ struct App {
     prompt_scroll: u16,
     /// Scroll offset for the Overview detail pane (lines from top).
     detail_scroll: u16,
-    /// Inner height of the detail pane from the last draw (for scroll clamp).
-    detail_view_h: u16,
     prompt_text: String,
     claims_session: Option<ClaimsSession>,
     show_help: bool,
@@ -259,7 +257,6 @@ impl App {
             batch: Vec::new(),
             prompt_scroll: 0,
             detail_scroll: 0,
-            detail_view_h: 8,
             prompt_text: String::new(),
             claims_session,
             show_help: false,
@@ -811,22 +808,13 @@ Press ? or esc to close help."#
         lines
     }
 
-    /// Max scroll so the last page still fills the viewport (not past the last line).
-    fn detail_max_scroll(&self) -> u16 {
-        let total = self.detail_pane_lines().len();
-        let view = self.detail_view_h.max(1) as usize;
-        total.saturating_sub(view) as u16
-    }
-
     fn scroll_detail(&mut self, delta: i32) {
-        let max = self.detail_max_scroll();
         if delta < 0 {
             self.detail_scroll = self.detail_scroll.saturating_sub((-delta) as u16);
         } else {
-            self.detail_scroll = self.detail_scroll.saturating_add(delta as u16).min(max);
+            let max = self.detail_pane_lines().len().saturating_sub(1) as u16;
+            self.detail_scroll = (self.detail_scroll.saturating_add(delta as u16)).min(max);
         }
-        // Always re-clamp (covers resize / content shrink).
-        self.detail_scroll = self.detail_scroll.min(self.detail_max_scroll());
     }
 
     fn selected_function(&self) -> Option<&ChaosFunction> {
@@ -1925,18 +1913,13 @@ Add functions with b on Overview or Priorities \
     }
 
     /// Detail panel used under Overview (modules + functions).
-    fn draw_detail_pane(&mut self, f: &mut Frame, area: Rect) {
+    fn draw_detail_pane(&self, f: &mut Frame, area: Rect) {
         let bg = self.theme.bg;
         let lines = self.detail_pane_lines();
         let total = lines.len();
-        let view_h = area.height.saturating_sub(2).max(1); // border → inner rows
-        self.detail_view_h = view_h;
-        let max_scroll = total.saturating_sub(view_h as usize);
-        if self.detail_scroll as usize > max_scroll {
-            self.detail_scroll = max_scroll as u16;
-        }
-        let scroll = self.detail_scroll as usize;
-        let view_h = view_h as usize;
+        let view_h = area.height.saturating_sub(2) as usize; // border
+        let max_scroll = total.saturating_sub(view_h.max(1));
+        let scroll = (self.detail_scroll as usize).min(max_scroll);
 
         let has_fn = self.selected_function().is_some();
         let batched = self
