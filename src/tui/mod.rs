@@ -855,19 +855,25 @@ Press ? or esc to close help."#
             lines.push(String::new());
             lines.push("(detail loading… or no chunk for this module)".into());
         }
-        lines.push(String::new());
-        if let Some(n) = self.batch_index(&fn_.id) {
-            lines.push(format!(
-                "BATCHED  [B{n}]  ·  position {n}/{}  ·  press b to remove  ·  c copy batch",
-                self.batch.len()
-            ));
-        } else {
-            lines.push(format!(
-                "not in batch  ·  press b to add ({})  ·  Prompt uses batch only",
-                self.batch_summary()
-            ));
-        }
         lines
+    }
+
+    /// Sticky footer for the detail pane (always visible; not part of scroll text).
+    fn detail_batch_footer(&self) -> String {
+        let Some(fn_) = self.selected_function() else {
+            return " select a function above · b adds to batch ".into();
+        };
+        if let Some(n) = self.batch_index(&fn_.id) {
+            format!(
+                " BATCHED [B{n}]  ·  {n}/{}  ·  b remove  ·  c copy batch ",
+                self.batch.len()
+            )
+        } else {
+            format!(
+                " not in batch  ·  b to add ({})  ·  Prompt uses batch only ",
+                self.batch_summary()
+            )
+        }
     }
 
     /// Max scroll so the last page still fills the viewport (not past the last line).
@@ -2025,35 +2031,35 @@ Add functions with b on Overview or Priorities \
     /// Detail panel used under Overview (modules + functions).
     fn draw_detail_pane(&mut self, f: &mut Frame, area: Rect) {
         let bg = self.theme.bg;
-        let body = self.detail_pane_lines().join("\n");
-        let total = self.detail_lines_cache.len();
-        let view_h = area.height.saturating_sub(2).max(1); // border → inner rows
-        self.detail_view_h = view_h;
-        let max_scroll = total.saturating_sub(view_h as usize);
-        if self.detail_scroll as usize > max_scroll {
-            self.detail_scroll = max_scroll as u16;
-        }
-        let scroll = self.detail_scroll as usize;
-        let view_h = view_h as usize;
-
+        let panel = self.theme.panel;
         let has_fn = self.selected_function().is_some();
         let batched = self
             .selected_function()
             .and_then(|f| self.batch_index(&f.id));
+        let footer = self.detail_batch_footer();
+
+        let body = self.detail_pane_lines().join("\n");
+        let total = self.detail_lines_cache.len();
+
+        // Border + sticky footer row; scroll uses the remaining height only.
+        let inner_h = area.height.saturating_sub(2); // border
+        let footer_h: u16 = if inner_h >= 2 { 1 } else { 0 };
+        let body_h = inner_h.saturating_sub(footer_h).max(1);
+        self.detail_view_h = body_h;
+        let max_scroll = total.saturating_sub(body_h as usize);
+        if self.detail_scroll as usize > max_scroll {
+            self.detail_scroll = max_scroll as u16;
+        }
+        let scroll = self.detail_scroll as usize;
+        let body_h_usize = body_h as usize;
+
         let title = if !has_fn {
             " Detail ".into()
-        } else if let Some(n) = batched {
-            format!(
-                " Detail  ·  [B{n}]  ·  lines {}–{}/{}  ·  pgup/pgdn · [ ]  ·  b batch ",
-                scroll + 1,
-                (scroll + view_h).min(total).max(scroll + 1),
-                total
-            )
         } else {
             format!(
-                " Detail  ·  lines {}–{}/{}  ·  pgup/pgdn · [ ]  ·  b batch ",
+                " Detail  ·  lines {}–{}/{}  ·  pgup/pgdn · [ ] ",
                 scroll + 1,
-                (scroll + view_h).min(total).max(scroll + 1),
+                (scroll + body_h_usize).min(total).max(scroll + 1),
                 total
             )
         };
@@ -2067,6 +2073,18 @@ Add functions with b on Overview or Priorities \
         f.render_widget(block, area);
         fill_pane(f, inner, &self.theme, bg);
 
+        let chunks = if footer_h > 0 {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(footer_h)])
+                .split(inner)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1)])
+                .split(inner)
+        };
+
         let style = if has_fn {
             paint_on(self.theme.text, bg)
         } else {
@@ -2077,8 +2095,31 @@ Add functions with b on Overview or Priorities \
                 .style(style)
                 .wrap(Wrap { trim: false })
                 .scroll((scroll as u16, 0)),
-            inner,
+            chunks[0],
         );
+
+        if footer_h > 0 && chunks.len() > 1 {
+            let foot_area = chunks[1];
+            let foot_fg = if batched.is_some() {
+                self.theme.batch
+            } else {
+                self.theme.muted
+            };
+            let foot_style = paint_bold_on(foot_fg, panel);
+            let buf = f.buffer_mut();
+            for col in 0..foot_area.width {
+                let cell = &mut buf[(foot_area.x + col, foot_area.y)];
+                cell.set_symbol(" ");
+                cell.set_style(paint_on(foot_fg, panel));
+            }
+            let text: String = footer.chars().take(foot_area.width as usize).collect();
+            buf.set_line(
+                foot_area.x,
+                foot_area.y,
+                &Line::from(Span::styled(text, foot_style)),
+                foot_area.width,
+            );
+        }
     }
 
     fn draw_prompt(&self, f: &mut Frame, area: Rect) {
