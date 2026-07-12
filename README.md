@@ -21,7 +21,8 @@ Private early development. Binary name: `chaos`.
 - **Heatmap** tab: view-only squarified byte treemap (same layout math as
   chaos-viewer) — green matched / grey unmatched / yellow claimed
 - Priority lists: nearly done, best scaffolded, biggest unmatched
-- Prompt builder (batch, max 16) with clipboard copy
+- Prompt builder (batch, max 16) with clipboard copy; **multiple templates**
+  (built-in chaos-viewer + user TOML under `~/.config/chaos/templates`)
 - Optional **pluggable claims** coordination: any HTTP coordinator via
   `project.claimsApi` (not hardcoded to one host) + `CLAIMS.md` merge
 
@@ -50,7 +51,13 @@ chaos --repo https://github.com/you/your-decomp
 chaos stats --input path/to/chaos-db.json
 chaos list --input path/to/chaos-db.json --priority nearly
 chaos prompt --input path/to/chaos-db.json --id 'module:0x02000000'
+chaos prompt --id '…' --template short
+chaos templates list
+chaos templates default short
 ```
+
+Prompt templates: [`docs/prompt-templates.md`](docs/prompt-templates.md). In the
+TUI Prompt page: **`t`** cycles templates, **`Shift+t`** sets the default.
 
 ### Claims (optional, pluggable)
 

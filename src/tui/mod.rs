@@ -25,8 +25,9 @@ use crate::load::{
     details_base_from_source, load_chaos_db, load_function_detail, DataSource, DetailCache,
 };
 use crate::prioritize::{priority_rows, PriorityMode};
-use crate::prompt::{batch_max, build_prompt, PromptOptions};
+use crate::prompt::{batch_max, PromptOptions};
 use crate::schema::{format_pct, ChaosDb, ChaosFunction, FunctionDetail, ProjectConfig};
+use crate::templates::TemplateStore;
 use crate::treemap::{layout_treemap, TreemapLeaf};
 use theme::Theme;
 
@@ -224,6 +225,10 @@ struct App {
     detail_lines_cache: Vec<String>,
     detail_lines_key: String,
     prompt_text: String,
+    /// Loaded prompt templates (builtin + ~/.config/chaos/templates).
+    template_store: TemplateStore,
+    /// Active template id for Prompt / copy.
+    prompt_template_id: String,
     claims_session: Option<ClaimsSession>,
     show_help: bool,
     should_quit: bool,
@@ -235,7 +240,7 @@ impl App {
             .user_agent("chaos-viewer-cli/0.1")
             .timeout(Duration::from_secs(30))
             .build()?;
-        Ok(Self {
+        let mut app = Self {
             theme: Theme::default(),
             screen: Screen::Setup,
             setup_input: String::new(),
@@ -272,10 +277,14 @@ impl App {
             detail_lines_cache: Vec::new(),
             detail_lines_key: String::new(),
             prompt_text: String::new(),
+            template_store: TemplateStore::load(),
+            prompt_template_id: String::new(),
             claims_session,
             show_help: false,
             should_quit: false,
-        })
+        };
+        app.prompt_template_id = app.template_store.default_id().to_string();
+        Ok(app)
     }
 
     fn global_hints(&self) -> Vec<KeyHint> {
@@ -387,8 +396,12 @@ impl App {
                     action: "scroll",
                 },
                 KeyHint {
-                    key: "pgup/pgdn",
-                    action: "scroll page",
+                    key: "t",
+                    action: "next template",
+                },
+                KeyHint {
+                    key: "S-t",
+                    action: "set default",
                 },
                 KeyHint {
                     key: "c",
@@ -441,6 +454,9 @@ PRIORITIES
 PROMPT
   j / k       scroll prompt text
   pgup/pgdn   scroll prompt by page
+  t           next prompt template (builtin + ~/.config/chaos/templates)
+  Shift+t     set current template as default
+  c           copy batch prompt
 
 SETUP
   type path, raw JSON URL, or GitHub repo URL
@@ -1016,8 +1032,58 @@ Add functions with b on Overview or Priorities \
             items.push((f, det));
         }
 
-        self.prompt_text = build_prompt(&project, &items, &opts);
+        let id = if self.prompt_template_id.is_empty() {
+            self.template_store.default_id().to_string()
+        } else {
+            self.prompt_template_id.clone()
+        };
+        self.prompt_template_id = id.clone();
+        match self.template_store.render(&id, &project, &items, &opts) {
+            Ok(text) => self.prompt_text = text,
+            Err(e) => {
+                self.prompt_text = format!("Template error ({id}): {e:#}");
+            }
+        }
         self.prompt_scroll = 0;
+    }
+
+    fn cycle_prompt_template(&mut self, delta: isize) {
+        self.prompt_template_id = self
+            .template_store
+            .cycle_id(&self.prompt_template_id, delta);
+    }
+
+    fn set_prompt_template_default(&mut self) {
+        match self.template_store.set_default(&self.prompt_template_id) {
+            Ok(()) => {
+                self.status = format!(
+                    "Default template → {} ({})",
+                    self.prompt_template_id,
+                    self.template_store
+                        .get(&self.prompt_template_id)
+                        .map(|e| e.name.as_str())
+                        .unwrap_or("?")
+                );
+            }
+            Err(e) => {
+                self.error = Some(format!("set default template: {e:#}"));
+            }
+        }
+    }
+
+    fn prompt_template_label(&self) -> String {
+        let id = &self.prompt_template_id;
+        let name = self
+            .template_store
+            .get(id)
+            .map(|e| e.name.as_str())
+            .unwrap_or(id.as_str());
+        let def = self.template_store.default_id();
+        if id == def {
+            format!("{name} ★")
+        } else {
+            name.to_string()
+        }
     }
 
     async fn toggle_batch_selected(&mut self) {
@@ -1309,6 +1375,19 @@ Add functions with b on Overview or Priorities \
                             self.status = "Overview · from priorities".into();
                         }
                     }
+                }
+            }
+            KeyCode::Char('t') if self.screen == Screen::Prompt => {
+                if mods.contains(KeyModifiers::SHIFT) {
+                    self.set_prompt_template_default();
+                } else {
+                    self.cycle_prompt_template(1);
+                    self.rebuild_prompt().await;
+                    self.status = format!(
+                        "Template: {}  (Shift+t = set default · {})",
+                        self.prompt_template_label(),
+                        self.template_store.templates_dir.display()
+                    );
                 }
             }
             KeyCode::PageUp if self.screen == Screen::Prompt => {
@@ -2141,7 +2220,8 @@ Add functions with b on Overview or Priorities \
         };
 
         let title = format!(
-            " Prompt  ·  batch {}  ·  c copy · j/k scroll ",
+            " Prompt  ·  {}  ·  batch {}  ·  t template · T default · c copy ",
+            self.prompt_template_label(),
             self.batch_summary()
         );
         let border = if self.batch.is_empty() {

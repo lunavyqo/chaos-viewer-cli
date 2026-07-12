@@ -21,7 +21,19 @@ pub fn batch_max() -> usize {
 
 /// Build a full prompt the same way the web viewer does:
 /// `[header, ...sections, footer].join("\n\n")`.
+///
+/// Prefer [`crate::templates::TemplateStore::render`] when a user template id
+/// is selected; this is the built-in `chaos-viewer` body.
 pub fn build_prompt(
+    project: &ProjectConfig,
+    functions: &[(ChaosFunction, Option<FunctionDetail>)],
+    opts: &PromptOptions,
+) -> String {
+    build_builtin_prompt(project, functions, opts)
+}
+
+/// Built-in chaos-viewer prompt (exact web parity).
+pub fn build_builtin_prompt(
     project: &ProjectConfig,
     functions: &[(ChaosFunction, Option<FunctionDetail>)],
     opts: &PromptOptions,
