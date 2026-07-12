@@ -212,6 +212,8 @@ struct App {
     detail: Option<FunctionDetail>,
     batch: Vec<String>,
     prompt_scroll: u16,
+    /// Scroll offset for the Overview detail pane (lines from top).
+    detail_scroll: u16,
     prompt_text: String,
     claims_session: Option<ClaimsSession>,
     show_help: bool,
@@ -254,6 +256,7 @@ impl App {
             detail: None,
             batch: Vec::new(),
             prompt_scroll: 0,
+            detail_scroll: 0,
             prompt_text: String::new(),
             claims_session,
             show_help: false,
@@ -327,6 +330,10 @@ impl App {
                 KeyHint {
                     key: "h/l",
                     action: "modules",
+                },
+                KeyHint {
+                    key: "pgup/pgdn",
+                    action: "detail scroll",
                 },
                 KeyHint {
                     key: "m",
@@ -404,6 +411,8 @@ GLOBAL
 OVERVIEW
   top: modules (h/l) · functions (j/k) · m match filter · / search
   bottom: detail pane for the selected function (loads as you move)
+  pgup/pgdn   scroll the detail pane (j/k still move the function list)
+  [ / ]       scroll detail one line
   b           toggle batch for selected function
 
 HEATMAP
@@ -708,7 +717,103 @@ Press ? or esc to close help."#
     fn sync_selection_from_fn(&mut self) {
         let Some(db) = &self.db else { return };
         if let Some(&idx) = self.fn_list.get(self.fn_sel) {
-            self.selected_id = Some(db.functions[idx].id.clone());
+            let new_id = db.functions[idx].id.clone();
+            if self.selected_id.as_deref() != Some(new_id.as_str()) {
+                self.detail_scroll = 0;
+            }
+            self.selected_id = Some(new_id);
+        }
+    }
+
+    /// Text lines shown in the Overview detail pane (full draft/disasm for scrolling).
+    fn detail_pane_lines(&self) -> Vec<String> {
+        let Some(fn_) = self.selected_function() else {
+            return vec!["No function selected. Move with j/k in the list above.".into()];
+        };
+        let locked = self
+            .locked_by
+            .get(&fn_.id)
+            .map(|h| format!("CLAIMED by {h}"))
+            .unwrap_or_else(|| "unlocked".into());
+        let mut lines = vec![
+            format!(
+                "{}  [{}]",
+                fn_.name,
+                if fn_.matched { "MATCHED" } else { "UNMATCHED" }
+            ),
+            format!(
+                "module {}  addr 0x{:x}  size {}  id {}",
+                fn_.module, fn_.addr, fn_.size, fn_.id
+            ),
+            locked,
+        ];
+        if let Some(d) = fn_.div {
+            lines.push(format!("near-miss div={d}  cat={:?}", fn_.cat));
+        }
+        if let Some(s) = fn_.sim {
+            lines.push(format!("similarity {s:.3}  sibling={:?}", fn_.sibling));
+        }
+        if let Some(floor) = &fn_.floor {
+            lines.push(format!("floor: {floor}"));
+        }
+        if let Some(a) = &fn_.author {
+            lines.push(format!("author: {a}"));
+        }
+        if let Some(det) = &self.detail {
+            if let Some(c) = &det.callees {
+                lines.push(format!("callees: {}", c.join(", ")));
+            }
+            if let Some(c) = &det.called_by {
+                lines.push(format!("called by: {}", c.join(", ")));
+            }
+            if let Some(draft) = &det.draft {
+                lines.push(String::new());
+                lines.push(format!("draft (div={:?}):", det.draft_div));
+                for l in draft.lines() {
+                    lines.push(l.to_string());
+                }
+            }
+            if let Some(dis) = &det.disasm {
+                lines.push(String::new());
+                lines.push(format!("disasm ({} lines):", dis.len()));
+                for l in dis {
+                    lines.push(l.clone());
+                }
+            }
+            if let Some(pool) = &det.pool {
+                if !pool.is_empty() {
+                    lines.push(String::new());
+                    lines.push(format!("pool ({} entries):", pool.len()));
+                    for p in pool {
+                        lines.push(format!("  {p}"));
+                    }
+                }
+            }
+        } else {
+            lines.push(String::new());
+            lines.push("(no detail chunk loaded for this module)".into());
+        }
+        lines.push(String::new());
+        if let Some(n) = self.batch_index(&fn_.id) {
+            lines.push(format!(
+                "BATCHED  [B{n}]  ·  position {n}/{}  ·  press b to remove  ·  c copy batch",
+                self.batch.len()
+            ));
+        } else {
+            lines.push(format!(
+                "not in batch  ·  press b to add ({})  ·  Prompt uses batch only",
+                self.batch_summary()
+            ));
+        }
+        lines
+    }
+
+    fn scroll_detail(&mut self, delta: i32) {
+        if delta < 0 {
+            self.detail_scroll = self.detail_scroll.saturating_sub((-delta) as u16);
+        } else {
+            let max = self.detail_pane_lines().len().saturating_sub(1) as u16;
+            self.detail_scroll = (self.detail_scroll.saturating_add(delta as u16)).min(max);
         }
     }
 
@@ -1072,6 +1177,7 @@ Add functions with b on Overview or Priorities \
                             let id = db.functions[idx].id.clone();
                             let module = db.functions[idx].module.clone();
                             self.selected_id = Some(id);
+                            self.detail_scroll = 0;
                             // Jump to Overview so the bottom detail pane is visible.
                             if let Some(i) = self.module_list.iter().position(|m| m == &module) {
                                 self.module_sel = i;
@@ -1089,6 +1195,18 @@ Add functions with b on Overview or Priorities \
             }
             KeyCode::PageDown if self.screen == Screen::Prompt => {
                 self.prompt_scroll = self.prompt_scroll.saturating_add(5);
+            }
+            KeyCode::PageUp if self.screen == Screen::Overview => {
+                self.scroll_detail(-8);
+            }
+            KeyCode::PageDown if self.screen == Screen::Overview => {
+                self.scroll_detail(8);
+            }
+            KeyCode::Char('[') if self.screen == Screen::Overview => {
+                self.scroll_detail(-1);
+            }
+            KeyCode::Char(']') if self.screen == Screen::Overview => {
+                self.scroll_detail(1);
             }
             // Arrow keys always move even when screen guards above don't match
             _ => {}
@@ -1797,25 +1915,34 @@ Add functions with b on Overview or Priorities \
     /// Detail panel used under Overview (modules + functions).
     fn draw_detail_pane(&self, f: &mut Frame, area: Rect) {
         let bg = self.theme.bg;
-        let Some(fn_) = self.selected_function() else {
-            let block = content_block(" Detail ", &self.theme, self.theme.border);
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            fill_pane(f, inner, &self.theme, bg);
-            f.render_widget(
-                Paragraph::new("No function selected. Move with j/k in the list above.")
-                    .style(paint_on(self.theme.muted, bg)),
-                inner,
-            );
-            return;
-        };
+        let lines = self.detail_pane_lines();
+        let total = lines.len();
+        let view_h = area.height.saturating_sub(2) as usize; // border
+        let max_scroll = total.saturating_sub(view_h.max(1));
+        let scroll = (self.detail_scroll as usize).min(max_scroll);
 
-        let title = if let Some(n) = self.batch_index(&fn_.id) {
-            format!(" Detail  ·  BATCHED [B{n}]  ·  b toggle batch ")
+        let has_fn = self.selected_function().is_some();
+        let batched = self
+            .selected_function()
+            .and_then(|f| self.batch_index(&f.id));
+        let title = if !has_fn {
+            " Detail ".into()
+        } else if let Some(n) = batched {
+            format!(
+                " Detail  ·  [B{n}]  ·  lines {}–{}/{}  ·  pgup/pgdn · [ ]  ·  b batch ",
+                scroll + 1,
+                (scroll + view_h).min(total).max(scroll + 1),
+                total
+            )
         } else {
-            " Detail  ·  b batch ".into()
+            format!(
+                " Detail  ·  lines {}–{}/{}  ·  pgup/pgdn · [ ]  ·  b batch ",
+                scroll + 1,
+                (scroll + view_h).min(total).max(scroll + 1),
+                total
+            )
         };
-        let border = if self.batch_index(&fn_.id).is_some() {
+        let border = if batched.is_some() {
             self.theme.batch
         } else {
             self.theme.border
@@ -1825,74 +1952,17 @@ Add functions with b on Overview or Priorities \
         f.render_widget(block, area);
         fill_pane(f, inner, &self.theme, bg);
 
-        let locked = self
-            .locked_by
-            .get(&fn_.id)
-            .map(|h| format!("CLAIMED by {h}"))
-            .unwrap_or_else(|| "unlocked".into());
-        let mut lines = vec![
-            format!(
-                "{}  [{}]",
-                fn_.name,
-                if fn_.matched { "MATCHED" } else { "UNMATCHED" }
-            ),
-            format!(
-                "module {}  addr 0x{:x}  size {}  id {}",
-                fn_.module, fn_.addr, fn_.size, fn_.id
-            ),
-            locked,
-        ];
-        if let Some(d) = fn_.div {
-            lines.push(format!("near-miss div={d}  cat={:?}", fn_.cat));
-        }
-        if let Some(s) = fn_.sim {
-            lines.push(format!("similarity {s:.3}  sibling={:?}", fn_.sibling));
-        }
-        if let Some(floor) = &fn_.floor {
-            lines.push(format!("floor: {floor}"));
-        }
-        if let Some(det) = &self.detail {
-            if let Some(c) = &det.callees {
-                lines.push(format!("callees: {}", c.join(", ")));
-            }
-            if let Some(c) = &det.called_by {
-                lines.push(format!("called by: {}", c.join(", ")));
-            }
-            if let Some(draft) = &det.draft {
-                lines.push(String::new());
-                lines.push(format!("draft (div={:?}):", det.draft_div));
-                for l in draft.lines().take(12) {
-                    lines.push(l.to_string());
-                }
-            }
-            if let Some(dis) = &det.disasm {
-                lines.push(String::new());
-                lines.push(format!("disasm ({} lines):", dis.len()));
-                for l in dis.iter().take(20) {
-                    lines.push(l.clone());
-                }
-            }
+        let body = lines.join("\n");
+        let style = if has_fn {
+            paint_on(self.theme.text, bg)
         } else {
-            lines.push(String::new());
-            lines.push("(no detail chunk loaded for this module)".into());
-        }
-        lines.push(String::new());
-        if let Some(n) = self.batch_index(&fn_.id) {
-            lines.push(format!(
-                "BATCHED  [B{n}]  ·  position {n}/{}  ·  press b to remove  ·  c copy batch",
-                self.batch.len()
-            ));
-        } else {
-            lines.push(format!(
-                "not in batch  ·  press b to add ({})  ·  Prompt uses batch only",
-                self.batch_summary()
-            ));
-        }
-
+            paint_on(self.theme.muted, bg)
+        };
         f.render_widget(
-            Paragraph::new(lines.join("\n"))
-                .style(paint_on(self.theme.text, bg))
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(body)
+                .style(style)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll as u16, 0)),
             inner,
         );
     }
