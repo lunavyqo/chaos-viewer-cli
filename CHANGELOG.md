@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Overview **unmatched** filter keeps fully matched modules in the module list
-  (shown as `done n/n` / green); counts show open work. **matched** filter
-  hides modules with zero matches. Cycling `m` rebuilds the module list.
+- Overview **unmatched** filter hides fully matched modules from the module
+  list (only modules with remaining open work); counts show `k/n open`.
+  **matched** filter hides modules with zero matches. Cycling `m` rebuilds
+  the module list.
 - Projects hub defaults focus to the **saved project list** (Tab or start
   typing to use the URL field).
 - Projects hub **delete** asks for confirmation (`y` / `n` or esc) before

@@ -81,12 +81,14 @@ impl MatchFilter {
 
     /// Whether a module belongs in the left list under this filter.
     ///
-    /// - **unmatched**: keep **all** modules (including fully matched, shown as 0 open)
-    /// - **matched**: keep modules that have at least one match
+    /// - **unmatched**: only modules with remaining open (unmatched) work
+    /// - **matched**: modules that have at least one match
     /// - **all**: every module
     fn keeps_module(self, matched: usize, total: usize) -> bool {
         match self {
-            Self::All | Self::UnmatchedOnly => total > 0,
+            Self::All => total > 0,
+            // Hide 100% matched modules — nothing left to do there.
+            Self::UnmatchedOnly => total > 0 && matched < total,
             Self::MatchedOnly => matched > 0,
         }
     }
@@ -2501,15 +2503,11 @@ Add functions with b on Overview or Priorities \
                 } else {
                     paint_on(fg, bg)
                 };
-                // Unmatched filter: show remaining open / total so fully matched still appear as 0/n.
+                // Unmatched filter: remaining open work (fully matched modules are already hidden).
                 let counts = match self.match_filter {
                     MatchFilter::UnmatchedOnly => {
                         let open = total.saturating_sub(matched);
-                        if open == 0 {
-                            format!("done {matched}/{total}")
-                        } else {
-                            format!("{open}/{total} open")
-                        }
+                        format!("{open}/{total} open")
                     }
                     MatchFilter::MatchedOnly | MatchFilter::All => {
                         format!("{matched}/{total}")
@@ -2519,7 +2517,7 @@ Add functions with b on Overview or Priorities \
             })
             .collect();
         let mod_title = match self.match_filter {
-            MatchFilter::UnmatchedOnly => " Modules  (incl. fully matched · h/l) ",
+            MatchFilter::UnmatchedOnly => " Modules  (have open · h/l) ",
             MatchFilter::MatchedOnly => " Modules  (have matches · h/l) ",
             MatchFilter::All => " Modules  (h/l) ",
         };
