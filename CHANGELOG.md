@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Projects hub **delete** asks for confirmation (`y` / `n` or esc) before
+  removing a saved profile.
 - Projects hub: source URL field accepts typing again (default focus is the
   input; plain `s` no longer steals keys from `https://` — use **Shift+s** to
   save a profile).
