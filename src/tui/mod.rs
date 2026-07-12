@@ -260,6 +260,10 @@ impl App {
                 action: "screens",
             },
             KeyHint {
+                key: "u",
+                action: "update progress",
+            },
+            KeyHint {
                 key: "?",
                 action: "help",
             },
@@ -371,7 +375,8 @@ GLOBAL
   q           quit
   tab / S-tab next / previous screen
   1 2 3 4 5   Overview · Priorities · Detail · Prompt · Claims
-  r           refresh claims
+  u           update progress (re-fetch chaos-db; matches can land mid-session)
+  r           refresh claims only
   c           copy current prompt to clipboard
   b           add/remove selected function from batch (max 16)
               batched rows show violet [B1] [B2] … badges in lists
@@ -415,15 +420,95 @@ Press ? or esc to close help."#
         let base = details_base_from_source(&source);
         self.detail_cache = Some(DetailCache::new(base));
         self.source = Some(source);
-        self.apply_db(db).await;
+        self.apply_db(db, true).await;
         Ok(())
     }
 
-    async fn apply_db(&mut self, db: ChaosDb) {
+    /// Re-fetch atlas data from the current source (local file or URL).
+    /// Matches / stats can change while you work; this picks up the latest publish.
+    async fn update_progress(&mut self) -> Result<()> {
+        let input = self
+            .source
+            .as_ref()
+            .map(|s| s.display())
+            .ok_or_else(|| anyhow::anyhow!("no data loaded yet"))?;
+        self.status = "Updating progress…".into();
+        self.error = None;
+
+        let prev_module = self.selected_module().map(str::to_string);
+        let prev_id = self.selected_id.clone();
+        let prev_batch = self.batch.clone();
+        let prev_screen = self.screen;
+        let prev_priority_mode = self.priority_mode;
+
+        let (db, source) = load_chaos_db(&self.client, Some(&input), None, None).await?;
+        let base = details_base_from_source(&source);
+        self.detail_cache = Some(DetailCache::new(base));
+        self.source = Some(source);
+
+        self.priority_mode = prev_priority_mode;
+        self.apply_db(db, false).await;
+
+        // Restore navigation context when possible.
+        if let Some(m) = prev_module {
+            if let Some(i) = self.module_list.iter().position(|x| x == &m) {
+                self.module_sel = i;
+            }
+        }
+        self.rebuild_functions();
+
+        if let Some(id) = prev_id {
+            if let Some(list_i) = self.fn_list.iter().enumerate().find_map(|(i, &idx)| {
+                self.db
+                    .as_ref()
+                    .filter(|d| d.functions.get(idx).map(|f| f.id == id).unwrap_or(false))
+                    .map(|_| i)
+            }) {
+                self.fn_sel = list_i;
+                self.selected_id = Some(id);
+            } else {
+                self.sync_selection_from_fn();
+            }
+        }
+
+        // Keep batch entries that still exist (matched/removed drop out).
+        if let Some(db) = &self.db {
+            self.batch = prev_batch
+                .into_iter()
+                .filter(|id| db.find_by_id(id).is_some())
+                .collect();
+        }
+
+        self.rebuild_priorities();
+        self.detail = None;
+        if prev_screen != Screen::Setup {
+            self.screen = prev_screen;
+        }
+        if matches!(self.screen, Screen::Detail | Screen::Prompt) {
+            self.load_selected_detail().await;
+        }
+        self.rebuild_prompt();
+
+        if let Some(db) = &self.db {
+            self.status = format!(
+                "Updated · {}/{} fn ({:.2}%) · batch {}/{}",
+                db.stats.matched_functions,
+                db.stats.total_functions,
+                db.match_pct_functions(),
+                self.batch.len(),
+                crate::prompt::batch_max(),
+            );
+        }
+        Ok(())
+    }
+
+    async fn apply_db(&mut self, db: ChaosDb, reset_to_overview: bool) {
         self.refresh_claims(&db).await;
         self.rebuild_modules(&db);
         self.db = Some(db);
-        self.screen = Screen::Overview;
+        if reset_to_overview {
+            self.screen = Screen::Overview;
+        }
         self.rebuild_functions();
         self.rebuild_priorities();
         self.rebuild_prompt();
@@ -860,6 +945,12 @@ Press ? or esc to close help."#
             }
             KeyCode::Char('c') => self.copy_prompt(),
             KeyCode::Char('b') => self.toggle_batch_selected(),
+            KeyCode::Char('u') => {
+                if let Err(e) = self.update_progress().await {
+                    self.error = Some(format!("{e:#}"));
+                    self.status = "Update failed".into();
+                }
+            }
             KeyCode::Char('r') => {
                 if let Some(db) = self.db.clone() {
                     self.refresh_claims(&db).await;
@@ -1649,7 +1740,7 @@ pub async fn run(
         let base = details_base_from_source(&source);
         app.detail_cache = Some(DetailCache::new(base));
         app.source = Some(source);
-        app.apply_db(db).await;
+        app.apply_db(db, true).await;
     } else if let Some(input) = input {
         app.load_from(&input).await?;
     }
