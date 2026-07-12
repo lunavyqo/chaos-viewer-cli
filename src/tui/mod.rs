@@ -229,6 +229,11 @@ struct App {
     template_store: TemplateStore,
     /// Active template id for Prompt / copy.
     prompt_template_id: String,
+    /// When true, `template_name_input` is editing a new template id.
+    naming_template: bool,
+    template_name_input: String,
+    /// After leaving the TUI briefly, open this path in $EDITOR / nano.
+    pending_edit: Option<std::path::PathBuf>,
     claims_session: Option<ClaimsSession>,
     show_help: bool,
     should_quit: bool,
@@ -279,6 +284,9 @@ impl App {
             prompt_text: String::new(),
             template_store: TemplateStore::load(),
             prompt_template_id: String::new(),
+            naming_template: false,
+            template_name_input: String::new(),
+            pending_edit: None,
             claims_session,
             show_help: false,
             should_quit: false,
@@ -317,6 +325,22 @@ impl App {
                 KeyHint {
                     key: "esc",
                     action: "cancel search",
+                },
+            ];
+        }
+        if self.naming_template {
+            return vec![
+                KeyHint {
+                    key: "type",
+                    action: "template id",
+                },
+                KeyHint {
+                    key: "enter",
+                    action: "create + edit",
+                },
+                KeyHint {
+                    key: "esc",
+                    action: "cancel",
                 },
             ];
         }
@@ -400,16 +424,16 @@ impl App {
                     action: "next template",
                 },
                 KeyHint {
+                    key: "n",
+                    action: "new template",
+                },
+                KeyHint {
                     key: "S-t",
                     action: "set default",
                 },
                 KeyHint {
                     key: "c",
                     action: "copy",
-                },
-                KeyHint {
-                    key: "b",
-                    action: "toggle batch",
                 },
             ],
             Screen::Claims => vec![KeyHint {
@@ -455,6 +479,7 @@ PROMPT
   j / k       scroll prompt text
   pgup/pgdn   scroll prompt by page
   t           next prompt template (builtin + ~/.config/chaos/templates)
+  n           new template (copy of chaos-viewer → editor)
   Shift+t     set current template as default
   c           copy batch prompt
 
@@ -1215,6 +1240,48 @@ Add functions with b on Overview or Priorities \
             return;
         }
 
+        if self.naming_template {
+            match key {
+                KeyCode::Esc => {
+                    self.naming_template = false;
+                    self.template_name_input.clear();
+                    self.status = "New template cancelled".into();
+                }
+                KeyCode::Enter => {
+                    let id = self.template_name_input.clone();
+                    self.naming_template = false;
+                    self.template_name_input.clear();
+                    match self.template_store.create_from_builtin(&id, None) {
+                        Ok(path) => {
+                            self.prompt_template_id = id;
+                            self.pending_edit = Some(path.clone());
+                            self.status = format!(
+                                "Created {} · opening {}…",
+                                path.display(),
+                                crate::templates::preferred_editor()
+                            );
+                        }
+                        Err(e) => {
+                            self.error = Some(format!("new template: {e:#}"));
+                            self.status = "Create failed".into();
+                        }
+                    }
+                }
+                KeyCode::Backspace | KeyCode::Delete => {
+                    self.template_name_input.pop();
+                }
+                KeyCode::Char(_) if !mods.contains(KeyModifiers::CONTROL) => {
+                    if let Some(c) = typed {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                            self.template_name_input.push(c);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // ? always available (Shift+/ on US keyboards)
         if key == KeyCode::Char('?') || matches!(typed, Some('?')) {
             self.show_help = true;
@@ -1384,11 +1451,18 @@ Add functions with b on Overview or Priorities \
                     self.cycle_prompt_template(1);
                     self.rebuild_prompt().await;
                     self.status = format!(
-                        "Template: {}  (Shift+t = set default · {})",
+                        "Template: {}  (Shift+t = set default · n = new · {})",
                         self.prompt_template_label(),
                         self.template_store.templates_dir.display()
                     );
                 }
+            }
+            KeyCode::Char('n') if self.screen == Screen::Prompt => {
+                self.naming_template = true;
+                self.template_name_input = "my-template".into();
+                self.status =
+                    "New template id (letters/digits/-/_) · enter create & edit · esc cancel"
+                        .into();
             }
             KeyCode::PageUp if self.screen == Screen::Prompt => {
                 self.prompt_scroll = self.prompt_scroll.saturating_sub(5);
@@ -2219,11 +2293,18 @@ Add functions with b on Overview or Priorities \
             format!("batch {}", self.batch_summary())
         };
 
-        let title = format!(
-            " Prompt  ·  {}  ·  batch {}  ·  t template · T default · c copy ",
-            self.prompt_template_label(),
-            self.batch_summary()
-        );
+        let title = if self.naming_template {
+            format!(
+                " Prompt  ·  new template id: {}_  ·  enter create · esc ",
+                self.template_name_input
+            )
+        } else {
+            format!(
+                " Prompt  ·  {}  ·  batch {}  ·  t cycle · n new · S-t default · c copy ",
+                self.prompt_template_label(),
+                self.batch_summary()
+            )
+        };
         let border = if self.batch.is_empty() {
             self.theme.border
         } else {
@@ -2351,6 +2432,7 @@ async fn run_loop(
                             app.screen,
                             Screen::Overview | Screen::Priorities | Screen::Prompt
                         ) && !app.searching
+                            && !app.naming_template
                             && !app.show_help
                             && matches!(
                                 code,
@@ -2385,6 +2467,36 @@ async fn run_loop(
                 app.on_key(key).await;
             }
         }
+
+        // Suspend TUI, open external editor for a new/edited template, resume.
+        if let Some(path) = app.pending_edit.take() {
+            disable_raw_mode()?;
+            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+            terminal.show_cursor()?;
+            let edit_result = crate::templates::open_in_editor(&path);
+            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+            enable_raw_mode()?;
+            terminal.hide_cursor()?;
+            terminal.clear()?;
+            app.template_store.reload();
+            if app.template_store.get(&app.prompt_template_id).is_none() {
+                app.prompt_template_id = app.template_store.default_id().to_string();
+            }
+            app.rebuild_prompt().await;
+            match edit_result {
+                Ok(()) => {
+                    app.status = format!(
+                        "Template ready · {} · t to cycle",
+                        path.file_stem().and_then(|s| s.to_str()).unwrap_or("?")
+                    );
+                }
+                Err(e) => {
+                    app.error = Some(format!("editor: {e:#}"));
+                    app.status = format!("File left at {}", path.display());
+                }
+            }
+        }
+
         if app.should_quit {
             break;
         }

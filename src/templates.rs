@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -165,6 +166,34 @@ impl TemplateStore {
         Ok(())
     }
 
+    /// Reload entries from disk (after creating/editing a template).
+    pub fn reload(&mut self) {
+        let fresh = Self::load();
+        self.config = fresh.config;
+        self.entries = fresh.entries;
+    }
+
+    /// Create `templates/<id>.toml` as an editable copy of the chaos-viewer prompt.
+    /// Returns the path written. Does not open an editor.
+    pub fn create_from_builtin(&self, id: &str, display_name: Option<&str>) -> Result<PathBuf> {
+        let id = sanitize_template_id(id)?;
+        if id == BUILTIN_ID {
+            bail!("'{BUILTIN_ID}' is reserved for the built-in template");
+        }
+        fs::create_dir_all(&self.templates_dir)?;
+        let path = self.templates_dir.join(format!("{id}.toml"));
+        if path.exists() {
+            bail!("template already exists: {}", path.display());
+        }
+        let name = display_name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(id.as_str());
+        let body = chaos_viewer_scaffold_toml(name);
+        fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
+        Ok(path)
+    }
+
     pub fn render(
         &self,
         id: &str,
@@ -234,6 +263,99 @@ fn load_user_template(path: &Path) -> Result<TemplateEntry> {
         kind: TemplateKind::User(file),
         path: Some(path.to_path_buf()),
     })
+}
+
+/// Preferred text editor: `$VISUAL`, then `$EDITOR`, then `nano`.
+pub fn preferred_editor() -> String {
+    std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "nano".into())
+}
+
+/// Open `path` in the preferred editor and wait until it exits.
+pub fn open_in_editor(path: &Path) -> Result<()> {
+    let editor = preferred_editor();
+    // Allow multi-word EDITOR values like `code -w` via the shell.
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "{} \"{}\"",
+            editor,
+            path.display().to_string().replace('"', "\\\"")
+        ))
+        .status()
+        .with_context(|| format!("spawn editor '{editor}'"))?;
+    if !status.success() {
+        bail!("editor '{editor}' exited with {status}");
+    }
+    Ok(())
+}
+
+/// Valid template id: start with letter/digit, then letters, digits, `-`, `_`.
+pub fn sanitize_template_id(raw: &str) -> Result<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        bail!("template id is empty");
+    }
+    if s.len() > 64 {
+        bail!("template id too long (max 64)");
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphanumeric() {
+        bail!("template id must start with a letter or digit");
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        bail!("template id may only contain letters, digits, '-' and '_'");
+    }
+    Ok(s.to_string())
+}
+
+/// TOML scaffold that mirrors the built-in chaos-viewer prompt structure.
+pub fn chaos_viewer_scaffold_toml(display_name: &str) -> String {
+    format!(
+        r#"# Prompt template for chaos-viewer-cli
+# File stem = template id. Edit, save, quit the editor — chaos reloads the list.
+# Placeholders: docs/prompt-templates.md
+# This file starts as an editable copy of the built-in chaos-viewer layout.
+
+name = "{name}"
+description = "Editable copy of the chaos-viewer prompt"
+
+header = """
+Match {{n}} {{project_name}} function(s) to the retail binary, byte-for-byte.
+
+SETUP (once): {{setup}}
+
+COMPILER: {{compiler}}
+{{cpp_note}}
+
+READ FIRST: {{read_first}}
+"""
+
+function = """
+======================================================================
+FUNCTION: {{name}}   module: {{module}}   addr: 0x{{addrHex}}   size: {{size}} bytes
+{{section_verify}}
+{{section_sibling}}
+{{section_floor}}
+{{section_draft}}
+{{section_disasm}}
+"""
+
+footer = """
+Rules: {{rules}}
+{{section_claims}}
+
+Matched means byte-identical - iterate until the verify command reports a MATCH.
+When it matches, fork the repo and open a pull request{{github_target}} against its default branch
+(one function or a small related family per PR; note the compiler version and the function address).
+
+{{near_miss_note}}
+"""
+"#,
+        name = display_name.replace('"', "'"),
+    )
 }
 
 fn seed_example_template(dir: &Path) {
@@ -606,6 +728,22 @@ mod tests {
         assert_eq!(store.default_id(), BUILTIN_ID);
         // example short.toml seeded
         assert!(dir.path().join("templates/short.toml").exists());
+        std::env::remove_var("CHAOS_HOME");
+    }
+
+    #[test]
+    fn create_from_builtin_writes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CHAOS_HOME", dir.path());
+        let store = TemplateStore::load();
+        let path = store
+            .create_from_builtin("my-copy", Some("My Copy"))
+            .unwrap();
+        assert!(path.exists());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("name = \"My Copy\""));
+        assert!(text.contains("section_disasm"));
+        assert!(sanitize_template_id("bad id").is_err());
         std::env::remove_var("CHAOS_HOME");
     }
 }
