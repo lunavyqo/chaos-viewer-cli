@@ -486,8 +486,9 @@ Press ? or esc to close help."#
         }
         if matches!(self.screen, Screen::Detail | Screen::Prompt) {
             self.load_selected_detail().await;
+        } else {
+            self.rebuild_prompt().await;
         }
-        self.rebuild_prompt();
 
         if let Some(db) = &self.db {
             self.status = format!(
@@ -511,7 +512,7 @@ Press ? or esc to close help."#
         }
         self.rebuild_functions();
         self.rebuild_priorities();
-        self.rebuild_prompt();
+        self.rebuild_prompt().await;
         if let Some(db) = &self.db {
             self.status = format!(
                 "Loaded {} · {}/{} fn ({:.2}%)",
@@ -696,7 +697,7 @@ Press ? or esc to close help."#
             Ok(d) => self.detail = d,
             Err(_) => self.detail = None,
         }
-        self.rebuild_prompt();
+        self.rebuild_prompt().await;
     }
 
     fn project(&self) -> ProjectConfig {
@@ -706,7 +707,9 @@ Press ? or esc to close help."#
             .unwrap_or_default()
     }
 
-    fn rebuild_prompt(&mut self) {
+    /// Rebuild prompt like the web viewer: always attach lazy-fetched detail
+    /// chunks (disasm / draft / pool) for every function in the prompt.
+    async fn rebuild_prompt(&mut self) {
         let project = self.project();
         let opts = PromptOptions {
             claims_session: self.claims_session.clone(),
@@ -715,27 +718,45 @@ Press ? or esc to close help."#
             self.prompt_text.clear();
             return;
         };
-        let mut items: Vec<(ChaosFunction, Option<FunctionDetail>)> = Vec::new();
-        if self.batch.is_empty() {
-            if let Some(f) = self.selected_function() {
-                items.push((f.clone(), self.detail.clone()));
-            }
+
+        // Collect targets first (owned) so we can await detail fetches.
+        let targets: Vec<ChaosFunction> = if self.batch.is_empty() {
+            self.selected_function().cloned().into_iter().collect()
         } else {
-            for id in &self.batch {
-                if let Some(f) = db.find_by_id(id) {
-                    items.push((f.clone(), None));
-                }
-            }
-        }
-        if items.is_empty() {
+            self.batch
+                .iter()
+                .filter_map(|id| db.find_by_id(id).cloned())
+                .collect()
+        };
+
+        if targets.is_empty() {
             self.prompt_text = "Select a function or add items to the batch.".into();
-        } else {
-            self.prompt_text = build_prompt(&project, &items, &opts);
+            self.prompt_scroll = 0;
+            return;
         }
+
+        let mut items: Vec<(ChaosFunction, Option<FunctionDetail>)> = Vec::new();
+        for f in targets {
+            let det = if let Some(cache) = &self.detail_cache {
+                load_function_detail(&self.client, cache, &f.module, &f.name)
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            // Keep selected-function detail cache in sync for the Detail view.
+            if self.selected_id.as_deref() == Some(f.id.as_str()) {
+                self.detail = det.clone();
+            }
+            items.push((f, det));
+        }
+
+        self.prompt_text = build_prompt(&project, &items, &opts);
         self.prompt_scroll = 0;
     }
 
-    fn toggle_batch_selected(&mut self) {
+    async fn toggle_batch_selected(&mut self) {
         let Some(id) = self.selected_id.clone() else {
             self.status = "Nothing selected to batch · pick a function first".into();
             return;
@@ -761,7 +782,7 @@ Press ? or esc to close help."#
         } else {
             self.status = format!("Batch full ({}/{})", self.batch.len(), batch_max());
         }
-        self.rebuild_prompt();
+        self.rebuild_prompt().await;
     }
 
     /// 1-based position in the prompt batch, if present.
@@ -930,8 +951,8 @@ Press ? or esc to close help."#
                 self.status = "Detail".into();
             }
             KeyCode::Char('4') => {
-                self.rebuild_prompt();
                 self.screen = Screen::Prompt;
+                self.rebuild_prompt().await;
                 self.status = "Prompt".into();
             }
             KeyCode::Char('5') => {
@@ -943,8 +964,12 @@ Press ? or esc to close help."#
                 self.screen = Screen::Overview;
                 self.status = "Search".into();
             }
-            KeyCode::Char('c') => self.copy_prompt(),
-            KeyCode::Char('b') => self.toggle_batch_selected(),
+            KeyCode::Char('c') => {
+                // Ensure disasm/draft are loaded before copy (web always has detail).
+                self.rebuild_prompt().await;
+                self.copy_prompt();
+            }
+            KeyCode::Char('b') => self.toggle_batch_selected().await,
             KeyCode::Char('u') => {
                 if let Err(e) = self.update_progress().await {
                     self.error = Some(format!("{e:#}"));
@@ -1031,7 +1056,7 @@ Press ? or esc to close help."#
                 self.status = "Detail".into();
             }
             Screen::Prompt => {
-                self.rebuild_prompt();
+                self.rebuild_prompt().await;
                 self.status = "Prompt".into();
             }
             Screen::Priorities => {
