@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Prompt page / `c` copy no longer fall back to the Overview cursor when the
+  batch is empty; prompts are built from the batch only (add with `b` first).
+
 ### Added
 
 - **Heatmap** TUI screen (`2` / tab): view-only squarified byte treemap (same
