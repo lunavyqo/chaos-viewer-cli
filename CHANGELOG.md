@@ -26,8 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   styles now use full `Style::reset()` so highlight/background does not leak
   across function list rows.
 - Selection no longer tints the cursor row and everything below it permanently:
-  list highlight is baked into each row with solid `theme.bg` / `theme.panel`
-  backgrounds (no `Color::Reset`, no List post-pass highlight style).
+  Overview/Priorities no longer use ratatui `List` (its highlight path was
+  unreliable here). Rows are drawn manually with solid backgrounds and a
+  full pane clear each frame.
 
 ### Added
 
