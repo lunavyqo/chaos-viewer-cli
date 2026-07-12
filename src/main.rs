@@ -11,8 +11,9 @@ use chaos_viewer_cli::load::{
     details_base_from_source, load_chaos_db, load_function_detail, DetailCache,
 };
 use chaos_viewer_cli::prioritize::{priority_rows, PriorityMode};
-use chaos_viewer_cli::prompt::{build_prompt, PromptOptions};
+use chaos_viewer_cli::prompt::PromptOptions;
 use chaos_viewer_cli::schema::format_pct;
+use chaos_viewer_cli::templates::TemplateStore;
 use chaos_viewer_cli::tui;
 use clap::{Parser, Subcommand};
 use reqwest::Client;
@@ -62,6 +63,9 @@ enum Commands {
         /// Function id (e.g. module:0x02000000)
         #[arg(long)]
         id: String,
+        /// Template id (default: config default, usually chaos-viewer)
+        #[arg(long)]
+        template: Option<String>,
         /// Write prompt to file instead of stdout
         #[arg(long)]
         out: Option<PathBuf>,
@@ -69,10 +73,28 @@ enum Commands {
         #[arg(long)]
         copy: bool,
     },
+    /// List / manage prompt templates (~/.config/chaos/templates)
+    Templates {
+        #[command(subcommand)]
+        cmd: TemplatesCmd,
+    },
     /// Talk to the project's claims coordinator (any compatible API)
     Claims {
         #[command(subcommand)]
         cmd: ClaimsCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TemplatesCmd {
+    /// List built-in and user templates
+    List,
+    /// Show config / templates directory
+    Dir,
+    /// Set the default template id
+    Default {
+        /// Template id (omit to print current default)
+        id: Option<String>,
     },
 }
 
@@ -202,7 +224,12 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Prompt { id, out, copy } => {
+        Commands::Prompt {
+            id,
+            template,
+            out,
+            copy,
+        } => {
             let (db, source) = load_chaos_db(
                 &client,
                 cli.input.as_deref(),
@@ -223,7 +250,14 @@ async fn main() -> Result<()> {
             let opts = PromptOptions {
                 claims_session: ClaimsSession::from_env(),
             };
-            let text = build_prompt(&project, &[(fn_, detail)], &opts);
+            let store = TemplateStore::load();
+            let tid = template
+                .as_deref()
+                .unwrap_or_else(|| store.default_id())
+                .to_string();
+            let text = store
+                .render(&tid, &project, &[(fn_, detail)], &opts)
+                .with_context(|| format!("render template '{tid}'"))?;
             if let Some(path) = out {
                 std::fs::write(&path, &text)
                     .with_context(|| format!("write {}", path.display()))?;
@@ -234,6 +268,53 @@ async fn main() -> Result<()> {
             if copy {
                 copy_text(&text)?;
                 eprintln!("copied to clipboard");
+            }
+        }
+        Commands::Templates { cmd } => {
+            let mut store = TemplateStore::load();
+            match cmd {
+                TemplatesCmd::List => {
+                    let def = store.default_id().to_string();
+                    println!("dir: {}", store.templates_dir.display());
+                    println!("default: {def}");
+                    println!();
+                    for e in &store.entries {
+                        let mark = if e.id == def { "*" } else { " " };
+                        let src = e
+                            .path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "builtin".into());
+                        println!("{mark} {:<20}  {}  ({src})", e.id, e.name);
+                        if !e.description.is_empty() {
+                            println!("    {}", e.description);
+                        }
+                    }
+                    if store.entries.len() == 1 {
+                        println!();
+                        println!(
+                            "Add user templates as {{id}}.toml under {}",
+                            store.templates_dir.display()
+                        );
+                        println!("See docs/prompt-templates.md");
+                    }
+                }
+                TemplatesCmd::Dir => {
+                    println!(
+                        "home:      {}",
+                        chaos_viewer_cli::templates::chaos_home().display()
+                    );
+                    println!("config:    {}", store.config_path.display());
+                    println!("templates: {}", store.templates_dir.display());
+                }
+                TemplatesCmd::Default { id: None } => {
+                    println!("{}", store.default_id());
+                }
+                TemplatesCmd::Default { id: Some(id) } => {
+                    store.set_default(&id)?;
+                    println!("default_template = {id}");
+                    println!("wrote {}", store.config_path.display());
+                }
             }
         }
         Commands::Claims { cmd } => {
