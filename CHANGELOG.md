@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Claims markdown parser no longer panics on Unicode placeholder rows (em dashes)
+  such as empty electroplankton-style `CLAIMS.md` tables; also accepts that
+  layout's Module/Range/Claimant columns.
+
 ### Added
 
 - Initial Rust CLI/TUI scaffold for Chaos Viewer atlas browsing.
