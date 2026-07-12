@@ -10,9 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Prompt templates**: built-in `chaos-viewer` plus user TOML files under
-  `~/.config/chaos/templates/`. TUI Prompt: `t` cycle, **`n` new** (scaffold +
-  open `$VISUAL`/`$EDITOR`/nano), `Shift+t` set default. CLI:
-  `chaos templates list|dir|default|new`, `chaos prompt --template <id>`.
+  `~/.config/chaos/templates/`. TUI Prompt: `t` cycle, **`n` new**, **`e` edit**
+  (open `$VISUAL`/`$EDITOR`/nano), `Shift+t` set default. CLI:
+  `chaos templates list|dir|default|new|edit`, `chaos prompt --template <id>`.
   See `docs/prompt-templates.md`.
 
 ### Fixed

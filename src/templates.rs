@@ -173,6 +173,25 @@ impl TemplateStore {
         self.entries = fresh.entries;
     }
 
+    /// Path to the on-disk file for a user template, if any.
+    pub fn path_for(&self, id: &str) -> Option<&Path> {
+        self.get(id).and_then(|e| e.path.as_deref())
+    }
+
+    /// Resolve a user template path for editing. Built-in has no file.
+    pub fn editable_path(&self, id: &str) -> Result<PathBuf> {
+        if id == BUILTIN_ID {
+            bail!(
+                "'{BUILTIN_ID}' is built-in and has no file; press n (or `chaos templates new`) to make an editable copy"
+            );
+        }
+        match self.path_for(id) {
+            Some(p) if p.exists() => Ok(p.to_path_buf()),
+            Some(p) => bail!("template file missing: {}", p.display()),
+            None => bail!("unknown template id '{id}'"),
+        }
+    }
+
     /// Create `templates/<id>.toml` as an editable copy of the chaos-viewer prompt.
     /// Returns the path written. Does not open an editor.
     pub fn create_from_builtin(&self, id: &str, display_name: Option<&str>) -> Result<PathBuf> {

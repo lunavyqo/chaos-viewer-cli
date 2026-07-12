@@ -428,6 +428,10 @@ impl App {
                     action: "new template",
                 },
                 KeyHint {
+                    key: "e",
+                    action: "edit template",
+                },
+                KeyHint {
                     key: "S-t",
                     action: "set default",
                 },
@@ -480,6 +484,7 @@ PROMPT
   pgup/pgdn   scroll prompt by page
   t           next prompt template (builtin + ~/.config/chaos/templates)
   n           new template (copy of chaos-viewer → editor)
+  e           edit current user template in $EDITOR / nano
   Shift+t     set current template as default
   c           copy batch prompt
 
@@ -1464,6 +1469,22 @@ Add functions with b on Overview or Priorities \
                     "New template id (letters/digits/-/_) · enter create & edit · esc cancel"
                         .into();
             }
+            KeyCode::Char('e') if self.screen == Screen::Prompt => {
+                match self.template_store.editable_path(&self.prompt_template_id) {
+                    Ok(path) => {
+                        self.pending_edit = Some(path.clone());
+                        self.status = format!(
+                            "Opening {} in {}…",
+                            path.display(),
+                            crate::templates::preferred_editor()
+                        );
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("{e:#}"));
+                        self.status = "Cannot edit this template".into();
+                    }
+                }
+            }
             KeyCode::PageUp if self.screen == Screen::Prompt => {
                 self.prompt_scroll = self.prompt_scroll.saturating_sub(5);
             }
@@ -2300,7 +2321,7 @@ Add functions with b on Overview or Priorities \
             )
         } else {
             format!(
-                " Prompt  ·  {}  ·  batch {}  ·  t cycle · n new · S-t default · c copy ",
+                " Prompt  ·  {}  ·  batch {}  ·  t · n new · e edit · S-t default · c ",
                 self.prompt_template_label(),
                 self.batch_summary()
             )

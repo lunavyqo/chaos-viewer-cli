@@ -107,6 +107,11 @@ enum TemplatesCmd {
         #[arg(long)]
         no_edit: bool,
     },
+    /// Open a user template in $EDITOR / nano (not the built-in)
+    Edit {
+        /// Template id (default: current default template)
+        id: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -339,6 +344,19 @@ async fn main() -> Result<()> {
                     } else {
                         println!("skipped editor (--no-edit); open the file yourself when ready");
                     }
+                }
+                TemplatesCmd::Edit { id } => {
+                    let tid = id
+                        .as_deref()
+                        .unwrap_or_else(|| store.default_id())
+                        .to_string();
+                    let path = store.editable_path(&tid)?;
+                    println!("editing {}", path.display());
+                    println!(
+                        "editor: {}",
+                        chaos_viewer_cli::templates::preferred_editor()
+                    );
+                    chaos_viewer_cli::templates::open_in_editor(&path)?;
                 }
             }
         }

@@ -57,8 +57,8 @@ chaos templates default short
 ```
 
 Prompt templates: [`docs/prompt-templates.md`](docs/prompt-templates.md). In the
-TUI Prompt page: **`t`** cycles, **`n`** creates a new template (copy of
-chaos-viewer → `$EDITOR`/`nano`), **`Shift+t`** sets the default.
+TUI Prompt page: **`t`** cycles, **`n`** new template, **`e`** edit current
+user template (`$EDITOR`/`nano`), **`Shift+t`** sets the default.
 
 ### Claims (optional, pluggable)
 
