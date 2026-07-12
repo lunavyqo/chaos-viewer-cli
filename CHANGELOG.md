@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so match % / function lists stay current while you work; keeps screen, module,
   selection, and batch entries that still exist.
 
+### Fixed
+
+- Prompt builder text matches chaos-viewer (`promptHeader` / `promptSection` /
+  `promptFooter`); TUI always lazy-loads detail chunks (disasm/draft/pool) for
+  single and batch prompts before preview/copy, same as the web app.
+
 ### Changed
 
 - TUI controls are always visible: numbered tabs (`1`–`5`), highlighted key hints
