@@ -31,6 +31,7 @@ On the **Prompt** page (`4`):
 |-----|--------|
 | `t` | Next template |
 | `n` | **New** template: type an id, Enter → creates a chaos-viewer copy and opens the editor |
+| `e` | **Edit** current user template in `$EDITOR` / nano (not the built-in) |
 | `Shift+t` | Save current as default |
 | `c` | Copy rendered prompt |
 
@@ -63,6 +64,10 @@ chaos prompt --id '…' --template short
 chaos templates new my-style
 chaos templates new my-style --name "My style"
 chaos templates new my-style --no-edit   # only write the file
+
+# Edit an existing user template (default id if omitted)
+chaos templates edit my-style
+chaos templates edit
 ```
 
 ## User template format (TOML)
