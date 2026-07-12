@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Detail is part of Overview**: modules and functions on top, a full-width
+  detail pane underneath (no separate Detail tab). Tabs are now 1 Overview ·
+  2 Heatmap · 3 Priorities · 4 Prompt · 5 Claims. Detail loads as you move
+  `j`/`k` on Overview. From Priorities, **enter** jumps to Overview with that
+  function selected.
+
 ### Added
 
 - Overview **`m` match filter**: cycle all → unmatched only → matched only
