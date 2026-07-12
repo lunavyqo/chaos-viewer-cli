@@ -7,7 +7,7 @@ use std::io::{self, stdout};
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -689,7 +689,18 @@ Press ? or esc to close help."#
         }
     }
 
-    async fn on_key(&mut self, key: KeyCode, mods: KeyModifiers) {
+    async fn on_key(&mut self, ev: KeyEvent) {
+        let mods = ev.modifiers;
+        // Keep original case for typing; lower-case for command keys.
+        let typed = match ev.code {
+            KeyCode::Char(c) => Some(c),
+            _ => None,
+        };
+        let key = match ev.code {
+            KeyCode::Char(c) => KeyCode::Char(c.to_ascii_lowercase()),
+            other => other,
+        };
+
         // Help overlay: dismiss only (second q after close will quit)
         if self.show_help {
             match key {
@@ -723,21 +734,23 @@ Press ? or esc to close help."#
                         format!("Filter: {} ({} matches)", self.search, self.fn_list.len())
                     };
                 }
-                KeyCode::Backspace => {
+                KeyCode::Backspace | KeyCode::Delete => {
                     self.search.pop();
                     self.rebuild_functions();
                 }
-                KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
-                    self.search.push(c);
-                    self.rebuild_functions();
+                KeyCode::Char(_) if !mods.contains(KeyModifiers::CONTROL) => {
+                    if let Some(c) = typed {
+                        self.search.push(c);
+                        self.rebuild_functions();
+                    }
                 }
                 _ => {}
             }
             return;
         }
 
-        // ? always available
-        if key == KeyCode::Char('?') {
+        // ? always available (Shift+/ on US keyboards)
+        if key == KeyCode::Char('?') || matches!(typed, Some('?')) {
             self.show_help = true;
             self.error = None;
             return;
@@ -745,9 +758,7 @@ Press ? or esc to close help."#
 
         if self.screen == Screen::Setup {
             match key {
-                KeyCode::Char('q') => self.should_quit = true,
                 KeyCode::Esc => {
-                    // do not silent-quit on esc in setup; show hint
                     self.status = "Press q to quit · enter to load".into();
                 }
                 KeyCode::Enter => {
@@ -761,12 +772,19 @@ Press ? or esc to close help."#
                         self.error = None;
                     }
                 }
-                KeyCode::Backspace => {
+                KeyCode::Backspace | KeyCode::Delete => {
                     self.setup_input.pop();
                 }
-                KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
-                    self.setup_input.push(c);
-                    self.error = None;
+                KeyCode::Char(_) if !mods.contains(KeyModifiers::CONTROL) => {
+                    if let Some(c) = typed {
+                        // Quit only when line is empty; otherwise allow typing q in URLs.
+                        if matches!(c, 'q' | 'Q') && self.setup_input.is_empty() {
+                            self.should_quit = true;
+                        } else {
+                            self.setup_input.push(c);
+                            self.error = None;
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -875,6 +893,7 @@ Press ? or esc to close help."#
             KeyCode::PageDown if self.screen == Screen::Prompt => {
                 self.prompt_scroll = self.prompt_scroll.saturating_add(5);
             }
+            // Arrow keys always move even when screen guards above don't match
             _ => {}
         }
     }
@@ -1614,10 +1633,21 @@ async fn run_loop(
 ) -> Result<()> {
     loop {
         terminal.draw(|f| app.draw(f))?;
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.on_key(key.code, key.modifiers).await;
+        if event::poll(Duration::from_millis(50))? {
+            // Drain the event queue so rapid keypresses aren't dropped.
+            while event::poll(Duration::from_millis(0))? {
+                match event::read()? {
+                    Event::Key(key) => {
+                        // Windows emits Press+Release; some terminals only emit
+                        // Repeat. Accept everything except Release.
+                        if key.kind != KeyEventKind::Release {
+                            app.on_key(key).await;
+                        }
+                    }
+                    Event::Resize(_, _) => {
+                        // Redraw on next loop iteration.
+                    }
+                    _ => {}
                 }
             }
         }
