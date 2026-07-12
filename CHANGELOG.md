@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Projects hub: source URL field accepts typing again (default focus is the
+  input; plain `s` no longer steals keys from `https://` — use **Shift+s** to
+  save a profile).
 - Project save no longer stores the discovered raw `chaos-db.json` URL (which
   made a “sm64ds” profile keep loading electroplankton). Saves/resumes use the
   original GitHub/path key; freeform loads clear a stale active profile; header

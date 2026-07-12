@@ -270,10 +270,11 @@ impl App {
             load_input: None,
             project_store,
             project_sel,
-            setup_list_focus: true,
+            // Default to source input so URLs can be typed immediately (Tab for list).
+            setup_list_focus: false,
             saving_project: false,
             project_id_input: String::new(),
-            status: "Select a saved project or type a path/URL · enter load · s save · p later"
+            status: "Type a path/URL then enter · Tab for project list · Shift+s save profile"
                 .into(),
             error: None,
             db: None,
@@ -340,8 +341,8 @@ impl App {
             }
             return vec![
                 KeyHint {
-                    key: "j/k",
-                    action: "projects",
+                    key: "type",
+                    action: "source URL",
                 },
                 KeyHint {
                     key: "tab",
@@ -352,7 +353,7 @@ impl App {
                     action: "load",
                 },
                 KeyHint {
-                    key: "s",
+                    key: "S-s",
                     action: "save profile",
                 },
                 KeyHint {
@@ -547,13 +548,13 @@ PROMPT
   c           copy batch prompt
 
 SETUP / PROJECTS
-  j / k       select saved project
+  type        source path / URL / GitHub (always works; focuses the input)
   tab         focus project list ↔ source input
-  enter       load selected project, or freeform source if input focused
-  s           save source line as a named project (then type id)
-  d           delete selected saved project
+  j / k       select saved project (when list focused)
+  enter       load typed source, or selected project if list focused
+  Shift+s     save current source as a named project (then type id)
+  d           delete selected saved project (list focused)
   p           open this hub from any loaded screen
-  type path, raw JSON URL, or GitHub repo in the input line
 
 Press ? or esc to close help."#
             .to_string()
@@ -1513,15 +1514,16 @@ Add functions with b on Overview or Priorities \
                         self.screen = Screen::Overview;
                         self.status = "Overview".into();
                     } else {
-                        self.status = "q quit · enter load · s save project".into();
+                        self.status =
+                            "type URL · enter load · Tab list · Shift+s save · q quit".into();
                     }
                 }
                 KeyCode::Tab => {
                     self.setup_list_focus = !self.setup_list_focus;
                     self.status = if self.setup_list_focus {
-                        "Focus: project list (j/k enter)"
+                        "Focus: project list (j/k enter · d delete · Shift+s save)"
                     } else {
-                        "Focus: source input (type · enter load · s save)"
+                        "Focus: source input (type URL · enter load · Shift+s save)"
                     }
                     .into();
                 }
@@ -1554,7 +1556,8 @@ Add functions with b on Overview or Priorities \
                         }
                     }
                 }
-                KeyCode::Char('s') => {
+                // Shift+s = save (plain `s` must type into https://…)
+                KeyCode::Char('s') if mods.contains(KeyModifiers::SHIFT) => {
                     let suggest = if let Ok(src) = self.profile_source_to_save() {
                         ProjectStore::suggest_id(&src)
                     } else if let Some(p) = self.project_store.projects.get(self.project_sel) {
@@ -1587,28 +1590,32 @@ Add functions with b on Overview or Priorities \
                             self.status = "Load failed".into();
                         } else {
                             self.error = None;
-                            // Keep freeform load; user can s to save.
-                            self.status = "Loaded · press s to save as a named project".into();
+                            self.status = "Loaded · Shift+s to save as a named project".into();
                         }
                     }
                 }
-                KeyCode::Backspace | KeyCode::Delete if !self.setup_list_focus => {
+                KeyCode::Backspace | KeyCode::Delete => {
+                    self.setup_list_focus = false;
                     self.setup_input.pop();
                 }
-                KeyCode::Char(_)
-                    if !self.setup_list_focus && !mods.contains(KeyModifiers::CONTROL) =>
-                {
+                KeyCode::Char(_) if !mods.contains(KeyModifiers::CONTROL) => {
                     if let Some(c) = typed {
-                        if matches!(c, 'q' | 'Q') && self.setup_input.is_empty() {
+                        if matches!(c, 'q' | 'Q')
+                            && self.setup_input.is_empty()
+                            && !mods.contains(KeyModifiers::SHIFT)
+                        {
                             self.should_quit = true;
+                        } else if self.setup_list_focus
+                            && matches!(c, 'j' | 'k' | 'd' | 'J' | 'K' | 'D')
+                        {
+                            // list shortcuts handled above
                         } else {
+                            // Any other character goes to the source URL field.
+                            self.setup_list_focus = false;
                             self.setup_input.push(c);
                             self.error = None;
                         }
                     }
-                }
-                KeyCode::Char('q') if self.setup_list_focus && self.setup_input.is_empty() => {
-                    self.should_quit = true;
                 }
                 _ => {}
             }
@@ -1619,7 +1626,7 @@ Add functions with b on Overview or Priorities \
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('p') => {
                 self.screen = Screen::Setup;
-                self.setup_list_focus = true;
+                self.setup_list_focus = false;
                 self.project_store.reload();
                 if let Some(id) = self.project_store.active_id.clone() {
                     if let Some(i) = self.project_store.index_of(&id) {
@@ -1627,7 +1634,7 @@ Add functions with b on Overview or Priorities \
                     }
                 }
                 self.status =
-                    "Projects · j/k select · enter load · s save · d delete · tab input".into();
+                    "Type source URL · enter load · Tab list · Shift+s save · d delete".into();
             }
             KeyCode::Esc => {
                 // Soft escape: clear error / go overview, do not quit
@@ -2371,7 +2378,7 @@ Add functions with b on Overview or Priorities \
         let help = if self.saving_project {
             "Enter id · enter save · esc cancel"
         } else {
-            "j/k list · tab focus · enter load · s save profile · d delete · esc overview · q quit"
+            "type URL · enter load · Tab list · j/k projects · Shift+s save · d delete · q quit"
         };
         f.render_widget(
             Paragraph::new(help)
