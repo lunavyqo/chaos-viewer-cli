@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local-only work
+.local/
+.local-keys/
+scratch/
+tmp/
+
+# Upstream web viewer (cloned for agent/context only; never commit)
+/reference/chaos-viewer/

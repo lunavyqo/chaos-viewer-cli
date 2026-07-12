@@ -1,0 +1,14 @@
+{
+  "func_near": {
+    "callees": ["func_matched_a"],
+    "calledBy": [],
+    "disasm": [
+      "  push {r4, lr}",
+      "  mov r0, #0",
+      "  pop {r4, pc}"
+    ],
+    "pool": [],
+    "draft": "int func_near(void) {\n  return 0;\n}\n",
+    "draftDiv": 2
+  }
+}

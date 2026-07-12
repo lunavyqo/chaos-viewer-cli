@@ -1,0 +1,68 @@
+{
+  "generatedAt": "2026-07-12 00:00",
+  "project": {
+    "name": "fixture-decomp",
+    "github": "https://github.com/example/fixture-decomp",
+    "compiler": "test-cc -O2",
+    "setup": "clone {github}",
+    "verifyCommand": "verify --func {name} --addr 0x{addrHex} --size 0x{sizeHex}",
+    "readFirst": "README.md",
+    "rules": "no ROM redistribution",
+    "nearMissNote": "save near-miss drafts"
+  },
+  "stats": {
+    "totalFunctions": 5,
+    "matchedFunctions": 2,
+    "totalBytes": 500,
+    "matchedBytes": 150,
+    "moduleCount": 2
+  },
+  "functions": [
+    {
+      "id": "arm9:0x02000000",
+      "module": "arm9",
+      "name": "func_matched_a",
+      "addr": 33554432,
+      "size": 100,
+      "matched": true,
+      "author": "alice"
+    },
+    {
+      "id": "arm9:0x02000100",
+      "module": "arm9",
+      "name": "func_near",
+      "addr": 33554688,
+      "size": 50,
+      "matched": false,
+      "div": 2,
+      "cat": "register allocation"
+    },
+    {
+      "id": "arm9:0x02000200",
+      "module": "arm9",
+      "name": "func_scaffold",
+      "addr": 33554944,
+      "size": 80,
+      "matched": false,
+      "sim": 0.91,
+      "sibling": "func_matched_a"
+    },
+    {
+      "id": "ov001:0x02100000",
+      "module": "ov001",
+      "name": "func_big",
+      "addr": 34603008,
+      "size": 200,
+      "matched": false
+    },
+    {
+      "id": "ov001:0x02101000",
+      "module": "ov001",
+      "name": "func_floor",
+      "addr": 34607104,
+      "size": 70,
+      "matched": false,
+      "floor": "documented compiler floor"
+    }
+  ]
+}
