@@ -78,6 +78,18 @@ impl MatchFilter {
             Self::MatchedOnly => matched,
         }
     }
+
+    /// Whether a module belongs in the left list under this filter.
+    ///
+    /// - **unmatched**: keep **all** modules (including fully matched, shown as 0 open)
+    /// - **matched**: keep modules that have at least one match
+    /// - **all**: every module
+    fn keeps_module(self, matched: usize, total: usize) -> bool {
+        match self {
+            Self::All | Self::UnmatchedOnly => total > 0,
+            Self::MatchedOnly => matched > 0,
+        }
+    }
 }
 
 impl Screen {
@@ -539,6 +551,7 @@ GLOBAL
 
 OVERVIEW
   top: modules (h/l) · functions (j/k) · m match filter · / search
+              unmatched filter keeps fully matched modules (done n/n)
   bottom: detail pane for the selected function (loads as you move)
   pgup/pgdn   scroll the detail pane (j/k still move the function list)
   [ / ]       scroll detail one line
@@ -849,9 +862,6 @@ Press ? or esc to close help."#
     }
 
     fn rebuild_modules(&mut self, db: &ChaosDb) {
-        let mut mods: Vec<String> = db.functions.iter().map(|f| f.module.clone()).collect();
-        mods.sort();
-        mods.dedup();
         // One linear pass for counts instead of O(modules × functions) every frame.
         let mut totals: HashMap<String, (usize, usize)> = HashMap::new();
         for f in &db.functions {
@@ -861,12 +871,23 @@ Press ? or esc to close help."#
                 e.0 += 1;
             }
         }
+        let mut mods: Vec<String> = totals.keys().cloned().collect();
+        mods.sort();
+        // Apply match filter to the module list (matched view drops never-touched modules).
+        let filter = self.match_filter;
+        mods.retain(|m| {
+            let (matched, total) = totals.get(m).copied().unwrap_or((0, 0));
+            filter.keeps_module(matched, total)
+        });
+        let prev = self.selected_module().map(str::to_string);
         self.module_counts = mods
             .iter()
             .map(|m| totals.get(m).copied().unwrap_or((0, 0)))
             .collect();
         self.module_list = mods;
-        self.module_sel = 0;
+        self.module_sel = prev
+            .and_then(|m| self.module_list.iter().position(|x| x == &m))
+            .unwrap_or(0);
         self.module_offset = 0;
     }
 
@@ -1751,11 +1772,15 @@ Add functions with b on Overview or Priorities \
             }
             KeyCode::Char('m') if self.screen == Screen::Overview => {
                 self.match_filter = self.match_filter.cycle();
+                if let Some(db) = self.db.clone() {
+                    self.rebuild_modules(&db);
+                }
                 self.rebuild_functions();
                 self.ensure_selected_detail().await;
                 self.status = format!(
-                    "Overview filter: {} ({} functions)",
+                    "Overview filter: {} ({} modules · {} functions)",
                     self.match_filter.label(),
+                    self.module_list.len(),
                     self.fn_list.len()
                 );
             }
@@ -2462,8 +2487,11 @@ Add functions with b on Overview or Priorities \
                 } else {
                     self.theme.bg
                 };
+                let done = total > 0 && matched == total;
                 let fg = if selected {
                     self.theme.accent
+                } else if done {
+                    self.theme.matched
                 } else {
                     self.theme.text
                 };
@@ -2473,13 +2501,32 @@ Add functions with b on Overview or Priorities \
                 } else {
                     paint_on(fg, bg)
                 };
-                Line::from(Span::styled(format!("{mark}{m}  {matched}/{total}"), style))
+                // Unmatched filter: show remaining open / total so fully matched still appear as 0/n.
+                let counts = match self.match_filter {
+                    MatchFilter::UnmatchedOnly => {
+                        let open = total.saturating_sub(matched);
+                        if open == 0 {
+                            format!("done {matched}/{total}")
+                        } else {
+                            format!("{open}/{total} open")
+                        }
+                    }
+                    MatchFilter::MatchedOnly | MatchFilter::All => {
+                        format!("{matched}/{total}")
+                    }
+                };
+                Line::from(Span::styled(format!("{mark}{m}  {counts}"), style))
             })
             .collect();
+        let mod_title = match self.match_filter {
+            MatchFilter::UnmatchedOnly => " Modules  (incl. fully matched · h/l) ",
+            MatchFilter::MatchedOnly => " Modules  (have matches · h/l) ",
+            MatchFilter::All => " Modules  (h/l) ",
+        };
         Self::draw_line_list(
             f,
             cols[0],
-            " Modules  (h/l) ".into(),
+            mod_title.into(),
             &self.theme,
             &mod_lines,
             self.module_offset,
