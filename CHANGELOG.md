@@ -29,8 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Overview/Priorities no longer use ratatui `List` (its highlight path was
   unreliable here). Rows are drawn manually with solid backgrounds and a
   full pane clear each frame.
-- Theme uses classic **ANSI colours** instead of 24-bit RGB for macOS 12
-  Terminal.app compatibility; each list cell is fully repainted every frame.
+- Theme uses terminal-safe colours (ANSI + 256-colour greys, not 24-bit RGB)
+  for macOS 12 Terminal.app compatibility; each list cell is fully repainted
+  every frame. Background is charcoal grey rather than pure black.
 
 ### Added
 
