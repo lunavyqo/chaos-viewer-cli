@@ -128,44 +128,67 @@ impl ProjectStore {
     }
 
     /// Suggest an id from a source string (repo name or file stem).
+    ///
+    /// Prefer the GitHub **repo name**, not a mangled full URL or `chaos-db`.
     pub fn suggest_id(source: &str) -> String {
         let s = source.trim().trim_end_matches('/');
-        let base = if s.contains("github.com/") {
-            s.rsplit('/')
-                .next()
-                .unwrap_or("project")
-                .trim_end_matches(".git")
+        let base = if let Some((_, name)) = crate::discover::parse_github(s) {
+            name
+        } else if let Some(rest) = s
+            .strip_prefix("https://raw.githubusercontent.com/")
+            .or_else(|| s.strip_prefix("http://raw.githubusercontent.com/"))
+        {
+            // raw.githubusercontent.com/{owner}/{repo}/...
+            rest.split('/').nth(1).unwrap_or("project").to_string()
         } else if s.ends_with(".json") {
-            Path::new(s)
+            // Prefer parent folder over "chaos-db"
+            let path = Path::new(s);
+            let stem = path
                 .file_stem()
                 .and_then(|x| x.to_str())
-                .unwrap_or("project")
+                .unwrap_or("project");
+            if stem.eq_ignore_ascii_case("chaos-db") || stem.eq_ignore_ascii_case("chaos_db") {
+                path.parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|x| x.to_str())
+                    .filter(|n| !n.is_empty() && *n != "data" && *n != "chaos-data")
+                    .unwrap_or(stem)
+                    .to_string()
+            } else {
+                stem.to_string()
+            }
         } else {
             Path::new(s)
                 .file_name()
                 .and_then(|x| x.to_str())
                 .unwrap_or("project")
+                .to_string()
         };
-        let mut id: String = base
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c.to_ascii_lowercase()
-                } else {
-                    '-'
-                }
-            })
-            .collect();
-        while id.contains("--") {
-            id = id.replace("--", "-");
-        }
-        id = id.trim_matches('-').to_string();
-        if id.is_empty() {
-            id = "project".into();
-        }
-        id.truncate(48);
-        id
+        clean_id_slug(&base)
     }
+}
+
+fn clean_id_slug(base: &str) -> String {
+    let mut id: String = base
+        .trim_end_matches(".git")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while id.contains("--") {
+        id = id.replace("--", "-");
+    }
+    id = id.trim_matches('-').to_string();
+    if id.is_empty() {
+        id = "project".into();
+    }
+    id.truncate(48);
+    id
 }
 
 pub fn sanitize_project_id(raw: &str) -> Result<String> {
@@ -203,6 +226,12 @@ mod tests {
         assert_eq!(
             ProjectStore::suggest_id("https://github.com/you/sm64ds-decomp"),
             "sm64ds-decomp"
+        );
+        assert_eq!(
+            ProjectStore::suggest_id(
+                "https://raw.githubusercontent.com/you/electroplankton-decomp/chaos-data/chaos-db.json"
+            ),
+            "electroplankton-decomp"
         );
     }
 

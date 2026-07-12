@@ -65,6 +65,37 @@ pub fn parse_github(github: &str) -> Option<(String, String)> {
     Some(re)
 }
 
+/// True if both strings refer to the same GitHub owner/repo (or are equal).
+pub fn sources_equivalent(a: &str, b: &str) -> bool {
+    let a = a.trim().trim_end_matches('/');
+    let b = b.trim().trim_end_matches('/');
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    if let (Some((o1, n1)), Some((o2, n2))) = (parse_github(a), parse_github(b)) {
+        return o1.eq_ignore_ascii_case(&o2) && n1.eq_ignore_ascii_case(&n2);
+    }
+    // raw.githubusercontent.com/owner/repo/...
+    if let (Some((o1, n1)), Some((o2, n2))) = (parse_raw_github(a), parse_raw_github(b)) {
+        return o1.eq_ignore_ascii_case(&o2) && n1.eq_ignore_ascii_case(&n2);
+    }
+    false
+}
+
+fn parse_raw_github(url: &str) -> Option<(String, String)> {
+    let s = url.trim();
+    let rest = s
+        .strip_prefix("https://raw.githubusercontent.com/")
+        .or_else(|| s.strip_prefix("http://raw.githubusercontent.com/"))?;
+    let mut parts = rest.split('/').filter(|p| !p.is_empty());
+    let owner = parts.next()?.to_string();
+    let name = parts.next()?.to_string();
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((owner, name))
+}
+
 /// Minimal github.com owner/repo extraction without a regex crate.
 fn regex_lite_match(github: &str) -> Option<(String, String)> {
     let s = github.trim().trim_end_matches('/');

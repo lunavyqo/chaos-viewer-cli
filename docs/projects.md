@@ -10,6 +10,14 @@
   projects.toml             # profile list
 ```
 
+## Important: what gets saved
+
+Profiles store the **source you typed** (GitHub repo URL or path), **not** the
+discovered raw `chaos-db.json` URL. That way switching projects re-runs discovery
+for the right repo instead of reloading a stashed electroplankton/sm64 raw file.
+
+Suggested ids use the **repo name** (`sm64ds-decomp`), never a mangled full URL.
+
 ## CLI
 
 ```bash
