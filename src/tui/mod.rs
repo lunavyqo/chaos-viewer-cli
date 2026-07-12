@@ -467,6 +467,9 @@ Press ? or esc to close help."#
     }
 
     /// Draw a bordered pane of pre-built lines with manual scrolling (no List widget).
+    ///
+    /// Every cell in the viewport is written with an explicit fg/bg so macOS
+    /// Terminal cannot keep a previous SGR colour for empty/short rows.
     fn draw_line_list(
         f: &mut Frame,
         area: Rect,
@@ -482,18 +485,22 @@ Press ? or esc to close help."#
             .style(paint_list_base(theme));
         let inner = block.inner(area);
         f.render_widget(block, area);
-        // Wipe the pane so no stale SGR/cells linger under shorter rows.
         f.render_widget(Clear, inner);
-        f.render_widget(
-            Block::default().style(paint_list_base(theme)),
-            inner,
-        );
 
         let height = inner.height as usize;
+        let width = inner.width as usize;
+        let base = paint_list_base(theme);
         let buf = f.buffer_mut();
+
         for row in 0..height {
-            let idx = offset + row;
             let y = inner.y + row as u16;
+            // Fill the full row first so no cell inherits a previous colour.
+            for col in 0..width {
+                let cell = &mut buf[(inner.x + col as u16, y)];
+                cell.set_symbol(" ");
+                cell.set_style(base);
+            }
+            let idx = offset + row;
             if let Some(line) = lines.get(idx) {
                 buf.set_line(inner.x, y, line, inner.width);
             }
@@ -1188,10 +1195,7 @@ Press ? or esc to close help."#
                 } else {
                     paint_on(fg, bg)
                 };
-                Line::from(Span::styled(
-                    format!("{mark}{m}  {matched}/{total}"),
-                    style,
-                ))
+                Line::from(Span::styled(format!("{mark}{m}  {matched}/{total}"), style))
             })
             .collect();
         Self::draw_line_list(
@@ -1287,14 +1291,7 @@ Press ? or esc to close help."#
                 self.batch_summary()
             )
         };
-        Self::draw_line_list(
-            f,
-            cols[1],
-            title,
-            &self.theme,
-            &fn_lines,
-            self.fn_offset,
-        );
+        Self::draw_line_list(f, cols[1], title, &self.theme, &fn_lines, self.fn_offset);
     }
 
     fn draw_priorities(&mut self, f: &mut Frame, area: Rect) {
@@ -1355,14 +1352,7 @@ Press ? or esc to close help."#
                 Line::from(spans)
             })
             .collect();
-        Self::draw_line_list(
-            f,
-            area,
-            title,
-            &self.theme,
-            &lines,
-            self.priority_offset,
-        );
+        Self::draw_line_list(f, area, title, &self.theme, &lines, self.priority_offset);
     }
 
     fn draw_detail(&self, f: &mut Frame, area: Rect) {
