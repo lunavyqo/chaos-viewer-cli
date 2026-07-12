@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   such as empty electroplankton-style `CLAIMS.md` tables; also accepts that
   layout's Module/Range/Claimant columns.
 
+### Changed
+
+- TUI controls are always visible: numbered tabs (`1`–`5`), highlighted key hints
+  in a bottom controls bar, and a `?` help overlay. `esc` no longer quits; use `q`.
+
 ### Added
 
 - Initial Rust CLI/TUI scaffold for Chaos Viewer atlas browsing.

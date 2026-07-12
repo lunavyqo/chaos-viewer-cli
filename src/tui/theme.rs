@@ -10,6 +10,8 @@ pub struct Theme {
     pub text: Color,
     pub muted: Color,
     pub accent: Color,
+    pub key: Color,
+    pub error: Color,
     pub matched: Color,
     pub unmatched: Color,
     pub claim: Color,
@@ -24,6 +26,8 @@ impl Default for Theme {
             text: Color::Rgb(230, 230, 235),
             muted: Color::Rgb(140, 140, 155),
             accent: Color::Rgb(120, 200, 255), // soft cyan
+            key: Color::Rgb(255, 200, 120),    // keycaps stand out
+            error: Color::Rgb(255, 120, 120),
             matched: Color::Rgb(80, 200, 140),
             unmatched: Color::Rgb(150, 150, 160),
             claim: Color::Rgb(230, 190, 80), // gold locks
