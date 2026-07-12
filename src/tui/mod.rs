@@ -87,6 +87,25 @@ fn paint_list_base(theme: &Theme) -> Style {
     Style::reset().fg(theme.text).bg(theme.bg)
 }
 
+/// Fill a pane with solid theme colours (never terminal default/white paper).
+fn fill_pane(f: &mut Frame, area: Rect, theme: &Theme, bg: Color) {
+    f.render_widget(Clear, area);
+    f.render_widget(Block::default().style(paint_on(theme.text, bg)), area);
+}
+
+/// Standard content block: dark bg + border.
+fn content_block<'a>(
+    title: impl Into<ratatui::text::Line<'a>>,
+    theme: &Theme,
+    border: Color,
+) -> Block<'a> {
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(paint_on(border, theme.bg))
+        .style(paint_on(theme.text, theme.bg))
+}
+
 fn key_line(theme: &Theme, hints: &[KeyHint], bg: Color) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, h) in hints.iter().enumerate() {
@@ -945,6 +964,9 @@ Press ? or esc to close help."#
 
     fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
+        // Entire frame solid dark first — no white terminal paper anywhere.
+        fill_pane(f, area, &self.theme, self.theme.bg);
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -971,6 +993,7 @@ Press ? or esc to close help."#
     }
 
     fn draw_header(&self, f: &mut Frame, area: Rect) {
+        let bg = self.theme.bg;
         let title = if let Some(db) = &self.db {
             let gen = if db.generated_at.is_empty() {
                 "—"
@@ -995,26 +1018,29 @@ Press ? or esc to close help."#
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border))
-            .style(Style::default().bg(self.theme.bg).fg(self.theme.text));
+            .border_style(paint_on(self.theme.border, bg))
+            .style(paint_on(self.theme.text, bg));
         let inner = block.inner(area);
         f.render_widget(block, area);
+        fill_pane(f, inner, &self.theme, bg);
 
         if self.screen == Screen::Setup || self.db.is_none() {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     title,
-                    Style::default()
-                        .fg(self.theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ))),
+                    paint_bold_on(self.theme.accent, bg),
+                )))
+                .style(paint_on(self.theme.text, bg)),
                 inner,
             );
             return;
         }
 
         let tabs = Screen::all_loaded();
-        let titles: Vec<Line> = tabs.iter().map(|s| Line::from(s.tab_label())).collect();
+        let titles: Vec<Line> = tabs
+            .iter()
+            .map(|s| Line::from(Span::styled(s.tab_label(), paint_on(self.theme.muted, bg))))
+            .collect();
         let selected = tabs.iter().position(|s| *s == self.screen).unwrap_or(0);
         let header_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -1023,22 +1049,17 @@ Press ? or esc to close help."#
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 title,
-                Style::default()
-                    .fg(self.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ))),
+                paint_bold_on(self.theme.accent, bg),
+            )))
+            .style(paint_on(self.theme.text, bg)),
             header_chunks[0],
         );
         f.render_widget(
             Tabs::new(titles)
                 .select(selected)
                 .divider(" │ ")
-                .style(Style::default().fg(self.theme.muted))
-                .highlight_style(
-                    Style::default()
-                        .fg(self.theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                .style(paint_on(self.theme.muted, bg))
+                .highlight_style(paint_bold_on(self.theme.accent, bg)),
             header_chunks[1],
         );
     }
@@ -1118,30 +1139,30 @@ Press ? or esc to close help."#
         let x = area.x + (area.width.saturating_sub(w)) / 2;
         let y = area.y + (area.height.saturating_sub(h)) / 2;
         let rect = Rect::new(x, y, w, h);
+        let bg = self.theme.panel;
 
         let block = Block::default()
             .title(" help  ·  ? or esc to close ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.accent))
-            .style(Style::default().bg(self.theme.panel).fg(self.theme.text));
+            .border_style(paint_on(self.theme.accent, bg))
+            .style(paint_on(self.theme.text, bg));
         let inner = block.inner(rect);
         f.render_widget(block, rect);
+        fill_pane(f, inner, &self.theme, bg);
         f.render_widget(
             Paragraph::new(self.help_text())
-                .style(Style::default().fg(self.theme.text))
+                .style(paint_on(self.theme.text, bg))
                 .wrap(Wrap { trim: false }),
             inner,
         );
     }
 
     fn draw_setup(&self, f: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .title(" Setup ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border))
-            .style(Style::default().bg(self.theme.bg).fg(self.theme.text));
+        let bg = self.theme.bg;
+        let block = content_block(" Setup ", &self.theme, self.theme.border);
         let inner = block.inner(area);
         f.render_widget(block, area);
+        fill_pane(f, inner, &self.theme, bg);
 
         let body = format!(
             "Point chaos at any decomp project that publishes chaos-db.json.\n\n\
@@ -1152,7 +1173,7 @@ Press ? or esc to close help."#
         );
         f.render_widget(
             Paragraph::new(body)
-                .style(Style::default().fg(self.theme.text))
+                .style(paint_on(self.theme.text, bg))
                 .wrap(Wrap { trim: false }),
             inner,
         );
@@ -1362,16 +1383,15 @@ Press ? or esc to close help."#
     }
 
     fn draw_detail(&self, f: &mut Frame, area: Rect) {
+        let bg = self.theme.bg;
         let Some(fn_) = self.selected_function() else {
-            let block = Block::default()
-                .title(" Function detail ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(self.theme.border));
+            let block = content_block(" Function detail ", &self.theme, self.theme.border);
             let inner = block.inner(area);
             f.render_widget(block, area);
+            fill_pane(f, inner, &self.theme, bg);
             f.render_widget(
                 Paragraph::new("No function selected. Pick one in Overview or Priorities.")
-                    .style(Style::default().fg(self.theme.muted)),
+                    .style(paint_on(self.theme.muted, bg)),
                 inner,
             );
             return;
@@ -1382,16 +1402,15 @@ Press ? or esc to close help."#
         } else {
             " Function detail ".into()
         };
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(if self.batch_index(&fn_.id).is_some() {
-                self.theme.batch
-            } else {
-                self.theme.border
-            }));
+        let border = if self.batch_index(&fn_.id).is_some() {
+            self.theme.batch
+        } else {
+            self.theme.border
+        };
+        let block = content_block(title, &self.theme, border);
         let inner = block.inner(area);
         f.render_widget(block, area);
+        fill_pane(f, inner, &self.theme, bg);
 
         let locked = self
             .locked_by
@@ -1459,13 +1478,14 @@ Press ? or esc to close help."#
 
         f.render_widget(
             Paragraph::new(lines.join("\n"))
-                .style(Style::default().fg(self.theme.text))
+                .style(paint_on(self.theme.text, bg))
                 .wrap(Wrap { trim: false }),
             inner,
         );
     }
 
     fn draw_prompt(&self, f: &mut Frame, area: Rect) {
+        let bg = self.theme.bg;
         let roster: String = if self.batch.is_empty() {
             "batch empty — select functions and press b (or copy single selection)".into()
         } else if let Some(db) = &self.db {
@@ -1486,39 +1506,38 @@ Press ? or esc to close help."#
             " Prompt  ·  batch {}  ·  c copy · j/k scroll ",
             self.batch_summary()
         );
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(if self.batch.is_empty() {
-                self.theme.border
-            } else {
-                self.theme.batch
-            }));
+        let border = if self.batch.is_empty() {
+            self.theme.border
+        } else {
+            self.theme.batch
+        };
+        let block = content_block(title, &self.theme, border);
         let inner = block.inner(area);
         f.render_widget(block, area);
+        fill_pane(f, inner, &self.theme, bg);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(2), Constraint::Min(1)])
             .split(inner);
 
+        let roster_fg = if self.batch.is_empty() {
+            self.theme.muted
+        } else {
+            self.theme.batch
+        };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 roster,
-                Style::default()
-                    .fg(if self.batch.is_empty() {
-                        self.theme.muted
-                    } else {
-                        self.theme.batch
-                    })
-                    .add_modifier(Modifier::BOLD),
+                paint_bold_on(roster_fg, bg),
             )))
+            .style(paint_on(self.theme.text, bg))
             .wrap(Wrap { trim: true }),
             chunks[0],
         );
         f.render_widget(
             Paragraph::new(self.prompt_text.as_str())
-                .style(Style::default().fg(self.theme.text))
+                .style(paint_on(self.theme.text, bg))
                 .wrap(Wrap { trim: false })
                 .scroll((self.prompt_scroll, 0)),
             chunks[1],
@@ -1526,12 +1545,11 @@ Press ? or esc to close help."#
     }
 
     fn draw_claims(&self, f: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .title(" Claims (read-only) ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border));
+        let bg = self.theme.bg;
+        let block = content_block(" Claims (read-only) ", &self.theme, self.theme.border);
         let inner = block.inner(area);
         f.render_widget(block, area);
+        fill_pane(f, inner, &self.theme, bg);
 
         let mut lines = vec![
             format!("status: {}", self.claims_status),
@@ -1552,7 +1570,7 @@ Press ? or esc to close help."#
             lines.push("Empty / placeholder tables are normal and not an error.".into());
         }
         f.render_widget(
-            Paragraph::new(lines.join("\n")).style(Style::default().fg(self.theme.text)),
+            Paragraph::new(lines.join("\n")).style(paint_on(self.theme.text, bg)),
             inner,
         );
     }
