@@ -9,11 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Projects hub defaults focus to the **saved project list** (Tab or start
+  typing to use the URL field).
 - Projects hub **delete** asks for confirmation (`y` / `n` or esc) before
   removing a saved profile.
-- Projects hub: source URL field accepts typing again (default focus is the
-  input; plain `s` no longer steals keys from `https://` — use **Shift+s** to
-  save a profile).
+- Projects hub: plain `s` no longer steals keys from `https://` — use
+  **Shift+s** to save a profile; typing still focuses the URL field.
 - Project save no longer stores the discovered raw `chaos-db.json` URL (which
   made a “sm64ds” profile keep loading electroplankton). Saves/resumes use the
   original GitHub/path key; freeform loads clear a stale active profile; header
