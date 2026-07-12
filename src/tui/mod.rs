@@ -27,7 +27,7 @@ use crate::load::{
 use crate::prioritize::{priority_rows, PriorityMode};
 use crate::prompt::{batch_max, build_prompt, PromptOptions};
 use crate::schema::{format_pct, ChaosDb, ChaosFunction, FunctionDetail, ProjectConfig};
-use crate::treemap::{build_heatmap_frame, step_sequential, step_spatial_centroids, TreemapLeaf};
+use crate::treemap::{layout_treemap, TreemapLeaf};
 use theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,13 +180,6 @@ struct App {
     prompt_scroll: u16,
     prompt_text: String,
     claims_session: Option<ClaimsSession>,
-    /// Heatmap: `None` = whole project; `Some(module)` zooms that module full-frame.
-    heatmap_zoom: Option<String>,
-    /// Index into the current navigable function list (reading order).
-    heatmap_sel: usize,
-    /// Last map canvas size used for layout (so nav matches what was drawn).
-    heatmap_cols: u16,
-    heatmap_rows: u16,
     show_help: bool,
     should_quit: bool,
 }
@@ -228,10 +221,6 @@ impl App {
             prompt_scroll: 0,
             prompt_text: String::new(),
             claims_session,
-            heatmap_zoom: None,
-            heatmap_sel: 0,
-            heatmap_cols: 80,
-            heatmap_rows: 24,
             show_help: false,
             should_quit: false,
         })
@@ -321,28 +310,7 @@ impl App {
                     action: "copy prompt",
                 },
             ],
-            Screen::Heatmap => vec![
-                KeyHint {
-                    key: "j/k",
-                    action: "next/prev",
-                },
-                KeyHint {
-                    key: "←↑↓→",
-                    action: "spatial",
-                },
-                KeyHint {
-                    key: "enter",
-                    action: "detail",
-                },
-                KeyHint {
-                    key: "z",
-                    action: "zoom",
-                },
-                KeyHint {
-                    key: "b",
-                    action: "batch",
-                },
-            ],
+            Screen::Heatmap => Vec::new(),
             Screen::Priorities => vec![
                 KeyHint {
                     key: "j/k",
@@ -427,11 +395,8 @@ OVERVIEW
   esc         leave search
 
 HEATMAP
-  j / k       next / previous function (stable reading order)
-  arrows      spatial neighbour (by painted centre)
-  enter       open function detail
-  z           zoom into selected function's module (again to unzoom)
-  braille map green=matched · grey=unmatched · yellow=claim · cyan=selected
+  view-only byte map (select a function on Overview / Priorities first)
+  green = matched · grey = unmatched · yellow = claimed · cyan = selected
 
 PRIORITIES
   n           cycle Nearly / Scaffolded / Biggest
@@ -987,8 +952,7 @@ Press ? or esc to close help."#
             }
             KeyCode::Char('2') => {
                 self.screen = Screen::Heatmap;
-                self.sync_heatmap_sel_from_selected();
-                self.status = self.heatmap_status();
+                self.status = "Heatmap".into();
             }
             KeyCode::Char('3') => {
                 self.screen = Screen::Priorities;
@@ -1008,9 +972,6 @@ Press ? or esc to close help."#
             KeyCode::Char('6') => {
                 self.screen = Screen::Claims;
                 self.status = format!("Claims · {}", self.claims_status);
-            }
-            KeyCode::Char('z') if self.screen == Screen::Heatmap => {
-                self.toggle_heatmap_zoom();
             }
             KeyCode::Char('/') => {
                 self.searching = true;
@@ -1049,30 +1010,6 @@ Press ? or esc to close help."#
                     self.priority_list.len()
                 );
             }
-            KeyCode::Char('k') if self.screen == Screen::Heatmap => {
-                self.move_heatmap_seq(-1);
-            }
-            KeyCode::Char('j') if self.screen == Screen::Heatmap => {
-                self.move_heatmap_seq(1);
-            }
-            KeyCode::Up if self.screen == Screen::Heatmap => {
-                self.move_heatmap_spatial(0, -1);
-            }
-            KeyCode::Down if self.screen == Screen::Heatmap => {
-                self.move_heatmap_spatial(0, 1);
-            }
-            KeyCode::Left if self.screen == Screen::Heatmap => {
-                self.move_heatmap_spatial(-1, 0);
-            }
-            KeyCode::Right if self.screen == Screen::Heatmap => {
-                self.move_heatmap_spatial(1, 0);
-            }
-            KeyCode::Char('h') if self.screen == Screen::Heatmap => {
-                self.move_heatmap_spatial(-1, 0);
-            }
-            KeyCode::Char('l') if self.screen == Screen::Heatmap => {
-                self.move_heatmap_spatial(1, 0);
-            }
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1).await,
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1).await,
             KeyCode::Left | KeyCode::Char('h') if self.screen == Screen::Overview => {
@@ -1098,10 +1035,6 @@ Press ? or esc to close help."#
                     self.screen = Screen::Detail;
                     self.load_selected_detail().await;
                     self.status = "Opened function detail".into();
-                } else if self.screen == Screen::Heatmap && self.selected_id.is_some() {
-                    self.screen = Screen::Detail;
-                    self.load_selected_detail().await;
-                    self.status = "Opened from heatmap".into();
                 }
             }
             KeyCode::PageUp if self.screen == Screen::Prompt => {
@@ -1145,8 +1078,7 @@ Press ? or esc to close help."#
                 self.status = format!("Priorities · {}", self.priority_mode.label());
             }
             Screen::Heatmap => {
-                self.sync_heatmap_sel_from_selected();
-                self.status = self.heatmap_status();
+                self.status = "Heatmap".into();
             }
             Screen::Claims => {
                 self.status = format!("Claims · {}", self.claims_status);
@@ -1200,136 +1132,22 @@ Press ? or esc to close help."#
         }
     }
 
-    /// Build treemap leaves from the loaded atlas (optional module zoom).
-    fn heatmap_leaves(&self) -> Vec<TreemapLeaf> {
-        let Some(db) = &self.db else {
-            return Vec::new();
-        };
-        db.functions.iter().map(TreemapLeaf::from).collect()
-    }
-
-    fn heatmap_frame(&self) -> crate::treemap::HeatmapFrame {
-        let cols = self.heatmap_cols.max(4);
-        let rows = self.heatmap_rows.max(3);
-        let leaves = self.heatmap_leaves();
-        build_heatmap_frame(
-            &leaves,
-            cols,
-            rows,
-            self.heatmap_zoom.as_deref(),
-            self.selected_id.as_deref(),
-        )
-    }
-
-    fn heatmap_status(&self) -> String {
-        let zoom = self
-            .heatmap_zoom
-            .as_deref()
-            .map(|m| format!("zoom:{m}"))
-            .unwrap_or_else(|| "all modules".into());
-        if let Some(f) = self.selected_function() {
-            let state = if f.matched {
-                "matched"
-            } else if self.locked_by.contains_key(&f.id) {
-                "claimed"
-            } else {
-                "unmatched"
-            };
-            format!("Heatmap · {zoom} · {} · {state} · {}B", f.name, f.size)
-        } else {
-            format!("Heatmap · {zoom}")
-        }
-    }
-
-    fn sync_heatmap_sel_from_selected(&mut self) {
-        let frame = self.heatmap_frame();
-        if frame.nav.is_empty() {
-            self.heatmap_sel = 0;
-            return;
-        }
-        if let Some(id) = self.selected_id.as_deref() {
-            if let Some(ni) = frame
-                .nav
-                .iter()
-                .position(|&fi| frame.functions[fi].id == id)
-            {
-                self.heatmap_sel = ni;
-                return;
-            }
-        }
-        self.heatmap_sel = self.heatmap_sel.min(frame.nav.len() - 1);
-        let id = frame.functions[frame.nav[self.heatmap_sel]].id.clone();
-        self.selected_id = Some(id);
-    }
-
-    fn apply_heatmap_nav(&mut self, frame: &crate::treemap::HeatmapFrame, nav_i: usize) {
-        if frame.nav.is_empty() {
-            return;
-        }
-        self.heatmap_sel = nav_i.min(frame.nav.len() - 1);
-        self.selected_id = Some(frame.functions[frame.nav[self.heatmap_sel]].id.clone());
-        self.status = self.heatmap_status();
-    }
-
-    /// Stable reading-order step (`j`/`k`).
-    fn move_heatmap_seq(&mut self, delta: isize) {
-        let frame = self.heatmap_frame();
-        if frame.nav.is_empty() {
-            return;
-        }
-        let next = step_sequential(frame.nav.len(), self.heatmap_sel, delta);
-        self.apply_heatmap_nav(&frame, next);
-    }
-
-    /// Spatial neighbour by painted centroid (arrow keys).
-    fn move_heatmap_spatial(&mut self, dir_x: i8, dir_y: i8) {
-        let frame = self.heatmap_frame();
-        if frame.nav.is_empty() {
-            return;
-        }
-        let next =
-            step_spatial_centroids(&frame.functions, &frame.nav, self.heatmap_sel, dir_x, dir_y);
-        self.apply_heatmap_nav(&frame, next);
-    }
-
-    fn toggle_heatmap_zoom(&mut self) {
-        if self.heatmap_zoom.is_some() {
-            self.heatmap_zoom = None;
-            self.sync_heatmap_sel_from_selected();
-            self.status = self.heatmap_status();
-            return;
-        }
-        if let Some(f) = self.selected_function() {
-            self.heatmap_zoom = Some(f.module.clone());
-            self.sync_heatmap_sel_from_selected();
-            self.status = self.heatmap_status();
-        } else {
-            self.status = "Heatmap · select a function before zoom".into();
-        }
-    }
-
     fn draw_heatmap(&mut self, f: &mut Frame, area: Rect) {
         if self.db.is_none() {
             return;
         }
 
-        let zoom_label = self
-            .heatmap_zoom
-            .as_deref()
-            .map(|m| format!("module {m}"))
-            .unwrap_or_else(|| "all modules".into());
-        let title =
-            format!(" Heatmap braille · {zoom_label} · j/k step · arrows spatial · z zoom ");
+        let title = " Heatmap ";
         let block = content_block(title, &self.theme, self.theme.border);
         let inner = block.inner(area);
         f.render_widget(block, area);
         fill_pane(f, inner, &self.theme, self.theme.bg);
 
-        if inner.width < 4 || inner.height < 3 {
+        if inner.width < 4 || inner.height < 2 {
             return;
         }
 
-        // Map body: leave 1 row at bottom for the selection legend.
+        // Map body + one-line legend for whatever is selected on other pages.
         let map_h = inner.height.saturating_sub(1).max(1);
         let map = Rect {
             x: inner.x,
@@ -1344,39 +1162,12 @@ Press ? or esc to close help."#
             height: 1,
         };
 
-        self.heatmap_cols = map.width;
-        self.heatmap_rows = map.height;
-
-        let leaves = self.heatmap_leaves();
-        let zoom = self.heatmap_zoom.clone();
-        let selected_id = self.selected_id.clone();
-        let frame = build_heatmap_frame(
-            &leaves,
-            map.width,
-            map.height,
-            zoom.as_deref(),
-            selected_id.as_deref(),
-        );
-
-        if !frame.nav.is_empty() {
-            if self.heatmap_sel >= frame.nav.len() {
-                self.heatmap_sel = 0;
-            }
-            if let Some(want) = selected_id.as_deref() {
-                if let Some(ni) = frame
-                    .nav
-                    .iter()
-                    .position(|&fi| frame.functions[fi].id == want)
-                {
-                    self.heatmap_sel = ni;
-                } else {
-                    self.selected_id =
-                        Some(frame.functions[frame.nav[self.heatmap_sel]].id.clone());
-                }
-            } else {
-                self.selected_id = Some(frame.functions[frame.nav[self.heatmap_sel]].id.clone());
-            }
-        }
+        let leaves: Vec<TreemapLeaf> = self
+            .db
+            .as_ref()
+            .map(|db| db.functions.iter().map(TreemapLeaf::from).collect())
+            .unwrap_or_default();
+        let rects = layout_treemap(&leaves, map.width as f64, map.height as f64, None);
 
         let selected_id = self.selected_id.clone();
         let locked_ids: std::collections::HashSet<String> =
@@ -1408,23 +1199,15 @@ Press ? or esc to close help."#
                 .position(|x| x == &f.id)
                 .map(|n| format!(" · [B{}]", n + 1))
                 .unwrap_or_default();
-            let px = frame
-                .functions
-                .iter()
-                .find(|rf| rf.id == f.id)
-                .map(|rf| rf.pixel_count)
-                .unwrap_or(0);
             format!(
-                " {}  {}  0x{:x}  {}B  {state}{batch_s}  · {px} dots ",
+                " {}  {}  0x{:x}  {}B  {state}{batch_s} ",
                 f.module, f.name, f.addr, f.size
             )
         } else {
-            " (no selection) ".into()
+            " (select a function on Overview or Priorities) ".into()
         };
 
         let buf = f.buffer_mut();
-
-        // Base dark fill for the map (gaps / borders show as empty braille dots).
         let base = paint_on(theme_muted, theme_bg);
         for row in 0..map.height {
             for col in 0..map.width {
@@ -1434,76 +1217,68 @@ Press ? or esc to close help."#
             }
         }
 
-        // Braille cells.
-        for row in 0..frame.rows {
-            for col in 0..frame.cols {
-                let Some(bc) = frame.cell(col, row) else {
-                    continue;
-                };
-                let x = map.x + col;
-                let y = map.y + row;
-                let cell = &mut buf[(x, y)];
-
-                if bc.ch == '\u{2800}' && !bc.has_selected {
-                    // Empty gap / border.
-                    cell.set_symbol(" ");
-                    cell.set_style(base);
-                    continue;
-                }
-
-                let (fg, bg, bold) = if bc.has_selected {
-                    (theme_accent, theme_bg, true)
-                } else if let Some(fi) = bc.color_fn {
-                    let rf = &frame.functions[fi];
-                    if locked_ids.contains(&rf.id) {
-                        (theme_claim, theme_bg, false)
-                    } else if batch.iter().any(|b| b == &rf.id) {
-                        (theme_batch, theme_bg, false)
-                    } else if rf.matched {
-                        (theme_matched, theme_bg, false)
-                    } else {
-                        (theme_unmatched, theme_bg, false)
+        // Module chrome (panel fill + label).
+        for r in rects.iter().filter(|r| r.is_module) {
+            if let Some((cx, cy, cw, ch)) = r.cell_bounds(map.width, map.height) {
+                let style = paint_on(theme_muted, theme_panel);
+                for row in 0..ch {
+                    for col in 0..cw {
+                        let cell = &mut buf[(map.x + cx + col, map.y + cy + row)];
+                        cell.set_symbol(" ");
+                        cell.set_style(style);
                     }
-                } else {
-                    (theme_muted, theme_bg, false)
-                };
-
-                let style = if bold {
-                    paint_bold_on(fg, bg)
-                } else {
-                    paint_on(fg, bg)
-                };
-                // Prefer the braille glyph; selected empty mask still shows a marker.
-                let sym = if bc.ch == '\u{2800}' && bc.has_selected {
-                    "◆"
-                } else {
-                    // ratatui set_symbol needs &str; braille is one char.
-                    // Use a tiny stack string via encoding below.
-                    ""
-                };
-                if sym.is_empty() {
-                    let mut tmp = [0u8; 4];
-                    let s = bc.ch.encode_utf8(&mut tmp);
-                    cell.set_symbol(s);
-                } else {
-                    cell.set_symbol(sym);
                 }
-                cell.set_style(style);
+                if let Some(label) = &r.module_label {
+                    if ch >= 1 && cw >= 4 {
+                        let text: String = label.chars().take(cw as usize).collect();
+                        let line =
+                            Line::from(Span::styled(text, paint_bold_on(theme_text, theme_panel)));
+                        buf.set_line(map.x + cx, map.y + cy, &line, cw);
+                    }
+                }
             }
         }
 
-        // Module labels on top (readable chrome).
-        for (cc, cr, label) in &frame.module_labels {
-            if *cr >= map.height || *cc >= map.width {
+        // Functions: block glyphs from the first heatmap (not braille).
+        for r in rects.iter().filter(|r| !r.is_module) {
+            let Some((cx, cy, cw, ch)) = r.cell_bounds(map.width, map.height) else {
                 continue;
+            };
+            let is_sel = selected_id.as_deref() == Some(r.id.as_str());
+            let is_locked = locked_ids.contains(&r.id);
+            let is_batch = batch.iter().any(|x| x == &r.id);
+            let (fg, bg) = if is_sel {
+                (theme_bg, theme_accent)
+            } else if is_locked {
+                (theme_bg, theme_claim)
+            } else if is_batch {
+                (theme_text, theme_batch)
+            } else if r.matched {
+                (theme_bg, theme_matched)
+            } else {
+                (theme_text, theme_unmatched)
+            };
+            let style = if is_sel {
+                paint_bold_on(fg, bg)
+            } else {
+                paint_on(fg, bg)
+            };
+            let sym = if is_sel {
+                "█"
+            } else if r.matched {
+                "▓"
+            } else if is_locked {
+                "▒"
+            } else {
+                "░"
+            };
+            for row in 0..ch {
+                for col in 0..cw {
+                    let cell = &mut buf[(map.x + cx + col, map.y + cy + row)];
+                    cell.set_symbol(sym);
+                    cell.set_style(style);
+                }
             }
-            let max_w = (map.width - cc) as usize;
-            let text: String = label.chars().take(max_w.min(24)).collect();
-            if text.is_empty() {
-                continue;
-            }
-            let line = Line::from(Span::styled(text, paint_bold_on(theme_text, theme_panel)));
-            buf.set_line(map.x + cc, map.y + cr, &line, map.width - cc);
         }
 
         let leg_style = paint_on(theme_text, theme_panel);

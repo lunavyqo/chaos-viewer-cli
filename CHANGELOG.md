@@ -9,14 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Heatmap** TUI screen (`2` / tab): squarified treemap of function bytes
-  (same layout math as chaos-viewer), painted with **Unicode braille** (2×4
-  sub-pixels per cell) so dense maps keep thin borders and tiny functions still
-  light at least one dot. Colors: green matched, grey unmatched, yellow claimed,
-  cyan selection, magenta batched. `j`/`k` = stable reading-order step; arrows =
-  spatial neighbour; `enter` opens detail; `z` zooms the selected module.
-  Tabs renumbered: 1 Overview · 2 Heatmap · 3 Priorities · 4 Detail · 5 Prompt ·
-  6 Claims.
+- **Heatmap** TUI screen (`2` / tab): view-only squarified byte treemap (same
+  layout math as chaos-viewer), painted with block glyphs (`░` unmatched, `▓`
+  matched, `▒` claimed, `█` selected). Selection comes from Overview/Priorities;
+  no heatmap-local controls. Tabs renumbered: 1 Overview · 2 Heatmap ·
+  3 Priorities · 4 Detail · 5 Prompt · 6 Claims.
 
 ### Fixed
 
