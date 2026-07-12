@@ -429,7 +429,7 @@ Press ? or esc to close help."#
         self.rebuild_prompt();
         if let Some(db) = &self.db {
             self.status = format!(
-                "Loaded {} · {}/{} fn ({:.2}%) · tab or 1-5 screens · ? help · q quit",
+                "Loaded {} · {}/{} fn ({:.2}%)",
                 db.project_name(),
                 db.stats.matched_functions,
                 db.stats.total_functions,
@@ -819,9 +819,9 @@ Press ? or esc to close help."#
                     self.status = "Error dismissed".into();
                 } else if self.screen != Screen::Overview {
                     self.screen = Screen::Overview;
-                    self.status = "Overview · press q to quit".into();
+                    self.status = "Overview".into();
                 } else {
-                    self.status = "Press q to quit · ? for help".into();
+                    self.status = "Overview".into();
                 }
             }
             KeyCode::Tab => {
@@ -847,7 +847,7 @@ Press ? or esc to close help."#
             KeyCode::Char('4') => {
                 self.rebuild_prompt();
                 self.screen = Screen::Prompt;
-                self.status = "Prompt · press c to copy".into();
+                self.status = "Prompt".into();
             }
             KeyCode::Char('5') => {
                 self.screen = Screen::Claims;
@@ -856,7 +856,7 @@ Press ? or esc to close help."#
             KeyCode::Char('/') => {
                 self.searching = true;
                 self.screen = Screen::Overview;
-                self.status = "Search mode · type to filter functions".into();
+                self.status = "Search".into();
             }
             KeyCode::Char('c') => self.copy_prompt(),
             KeyCode::Char('b') => self.toggle_batch_selected(),
@@ -933,27 +933,25 @@ Press ? or esc to close help."#
     }
 
     async fn on_screen_enter(&mut self) {
+        // Short status only — key hints live in the controls bar below.
         match self.screen {
             Screen::Detail => {
                 self.load_selected_detail().await;
-                self.status = "Detail · b batch · c copy · ? help".into();
+                self.status = "Detail".into();
             }
             Screen::Prompt => {
                 self.rebuild_prompt();
-                self.status = "Prompt · c copy · j/k scroll · ? help".into();
+                self.status = "Prompt".into();
             }
             Screen::Priorities => {
                 self.rebuild_priorities();
-                self.status = format!(
-                    "Priorities · {} · n cycle · ? help",
-                    self.priority_mode.label()
-                );
+                self.status = format!("Priorities · {}", self.priority_mode.label());
             }
             Screen::Claims => {
-                self.status = format!("Claims · {} · r refresh · ? help", self.claims_status);
+                self.status = format!("Claims · {}", self.claims_status);
             }
             Screen::Overview => {
-                self.status = "Overview · j/k functions · h/l modules · enter open · ? help".into();
+                self.status = "Overview".into();
             }
             Screen::Setup => {}
         }
@@ -1040,7 +1038,7 @@ Press ? or esc to close help."#
     /// All 5 pages on one line; current page marked as a reversed chip `[name]`.
     fn pages_line(&self, bg: Color) -> Line<'static> {
         let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.push(Span::styled(" pages ", paint_on(self.theme.muted, bg)));
+        spans.push(Span::styled(" ", paint_on(self.theme.muted, bg)));
         for (i, screen) in Screen::all_loaded().iter().enumerate() {
             if i > 0 {
                 spans.push(Span::styled(" ", paint_on(self.theme.muted, bg)));
@@ -1059,10 +1057,6 @@ Press ? or esc to close help."#
                 ));
             }
         }
-        spans.push(Span::styled(
-            "   tab · 1-5 ",
-            paint_on(self.theme.muted, bg),
-        ));
         Line::from(spans)
     }
 
