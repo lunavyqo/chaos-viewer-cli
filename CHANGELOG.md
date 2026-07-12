@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Overview detail **batch status line** is a sticky footer (always visible while
+  scrolling draft/disasm), not part of the scrollable text.
 - **Overview j/k lag**: list navigation no longer rebuilds the batch prompt on
   every step; detail loads from the in-memory module cache when possible;
   module match counts are precomputed; detail text is cached; rapid j/k are
