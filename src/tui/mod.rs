@@ -50,16 +50,41 @@ impl Screen {
         ]
     }
 
-    fn title(self) -> &'static str {
+    /// Tab label with hotkey so navigation is discoverable.
+    fn tab_label(self) -> String {
         match self {
-            Screen::Setup => "Setup",
-            Screen::Overview => "Overview",
-            Screen::Priorities => "Priorities",
-            Screen::Detail => "Detail",
-            Screen::Prompt => "Prompt",
-            Screen::Claims => "Claims",
+            Screen::Setup => "Setup".into(),
+            Screen::Overview => "1 Overview".into(),
+            Screen::Priorities => "2 Priorities".into(),
+            Screen::Detail => "3 Detail".into(),
+            Screen::Prompt => "4 Prompt".into(),
+            Screen::Claims => "5 Claims".into(),
         }
     }
+}
+
+/// One visible key binding for the chrome / help overlay.
+struct KeyHint {
+    key: &'static str,
+    action: &'static str,
+}
+
+fn key_line(theme: &Theme, hints: &[KeyHint]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, h) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::default().fg(theme.muted)));
+        }
+        spans.push(Span::styled(
+            h.key.to_string(),
+            Style::default().fg(theme.key).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", h.action),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    Line::from(spans)
 }
 
 struct App {
@@ -90,6 +115,7 @@ struct App {
     prompt_scroll: u16,
     prompt_text: String,
     claims_session: Option<ClaimsSession>,
+    show_help: bool,
     should_quit: bool,
 }
 
@@ -127,8 +153,187 @@ impl App {
             prompt_scroll: 0,
             prompt_text: String::new(),
             claims_session,
+            show_help: false,
             should_quit: false,
         })
+    }
+
+    fn global_hints(&self) -> Vec<KeyHint> {
+        if self.screen == Screen::Setup {
+            return vec![
+                KeyHint {
+                    key: "enter",
+                    action: "load",
+                },
+                KeyHint {
+                    key: "?",
+                    action: "help",
+                },
+                KeyHint {
+                    key: "q",
+                    action: "quit",
+                },
+            ];
+        }
+        if self.searching {
+            return vec![
+                KeyHint {
+                    key: "type",
+                    action: "filter",
+                },
+                KeyHint {
+                    key: "enter",
+                    action: "apply",
+                },
+                KeyHint {
+                    key: "esc",
+                    action: "cancel search",
+                },
+            ];
+        }
+        vec![
+            KeyHint {
+                key: "tab/1-5",
+                action: "screens",
+            },
+            KeyHint {
+                key: "?",
+                action: "help",
+            },
+            KeyHint {
+                key: "q",
+                action: "quit",
+            },
+        ]
+    }
+
+    fn context_hints(&self) -> Vec<KeyHint> {
+        if self.screen == Screen::Setup || self.searching {
+            return Vec::new();
+        }
+        match self.screen {
+            Screen::Overview => vec![
+                KeyHint {
+                    key: "j/k",
+                    action: "functions",
+                },
+                KeyHint {
+                    key: "h/l",
+                    action: "modules",
+                },
+                KeyHint {
+                    key: "enter",
+                    action: "open detail",
+                },
+                KeyHint {
+                    key: "/",
+                    action: "search",
+                },
+                KeyHint {
+                    key: "b",
+                    action: "batch",
+                },
+                KeyHint {
+                    key: "c",
+                    action: "copy prompt",
+                },
+            ],
+            Screen::Priorities => vec![
+                KeyHint {
+                    key: "j/k",
+                    action: "move",
+                },
+                KeyHint {
+                    key: "n",
+                    action: "cycle list",
+                },
+                KeyHint {
+                    key: "enter",
+                    action: "open detail",
+                },
+                KeyHint {
+                    key: "b",
+                    action: "batch",
+                },
+                KeyHint {
+                    key: "c",
+                    action: "copy prompt",
+                },
+            ],
+            Screen::Detail => vec![
+                KeyHint {
+                    key: "b",
+                    action: "toggle batch",
+                },
+                KeyHint {
+                    key: "c",
+                    action: "copy prompt",
+                },
+                KeyHint {
+                    key: "4",
+                    action: "prompt view",
+                },
+            ],
+            Screen::Prompt => vec![
+                KeyHint {
+                    key: "j/k",
+                    action: "scroll",
+                },
+                KeyHint {
+                    key: "pgup/pgdn",
+                    action: "scroll page",
+                },
+                KeyHint {
+                    key: "c",
+                    action: "copy",
+                },
+                KeyHint {
+                    key: "b",
+                    action: "toggle batch",
+                },
+            ],
+            Screen::Claims => vec![KeyHint {
+                key: "r",
+                action: "refresh claims",
+            }],
+            Screen::Setup => Vec::new(),
+        }
+    }
+
+    fn help_text(&self) -> String {
+        r#"chaos — keyboard reference
+
+GLOBAL
+  ?           toggle this help
+  q           quit
+  tab / S-tab next / previous screen
+  1 2 3 4 5   Overview · Priorities · Detail · Prompt · Claims
+  r           refresh claims
+  c           copy current prompt to clipboard
+  b           add/remove selected function from batch (max 16)
+
+OVERVIEW
+  j / k       next / previous function  (also ↑ ↓)
+  h / l       previous / next module    (also ← →)
+  enter       open function detail
+  /           search (filter by name, module, id)
+  esc         leave search
+
+PRIORITIES
+  n           cycle Nearly / Scaffolded / Biggest
+  j / k       move in ranked list
+  enter       open selected function
+
+DETAIL / PROMPT
+  j / k       scroll prompt text
+  pgup/pgdn   scroll prompt by page
+
+SETUP
+  type path, raw JSON URL, or GitHub repo URL
+  enter       load atlas
+
+Press ? or esc to close help."#
+            .to_string()
     }
 
     async fn load_from(&mut self, input: &str) -> Result<()> {
@@ -160,15 +365,11 @@ impl App {
         self.rebuild_prompt();
         if let Some(db) = &self.db {
             self.status = format!(
-                "Loaded {} · {} / {} fn ({:.2}%) · {}",
+                "Loaded {} · {}/{} fn ({:.2}%) · tab or 1-5 screens · ? help · q quit",
                 db.project_name(),
                 db.stats.matched_functions,
                 db.stats.total_functions,
                 db.match_pct_functions(),
-                self.source
-                    .as_ref()
-                    .map(|s| s.display())
-                    .unwrap_or_default()
             );
         }
     }
@@ -188,16 +389,18 @@ impl App {
                 self.locked_by = merge_locked_map(&db.functions, &claims);
                 self.claims_status = if live {
                     format!(
-                        "live · {} ranges · {} locked fn",
+                        "live · {} ranges · {} locked functions",
                         claims.len(),
                         self.locked_by.len()
                     )
+                } else if api.is_none() && gh.is_none() {
+                    "no claims source in project config".into()
                 } else {
-                    "unavailable".into()
+                    "CLAIMS.md / API not found (optional)".into()
                 };
             }
             Err(e) => {
-                self.claims_status = format!("error: {e}");
+                self.claims_status = format!("claims fetch failed: {e}");
                 self.locked_by.clear();
                 self.claims_count = 0;
             }
@@ -365,14 +568,38 @@ impl App {
     }
 
     async fn on_key(&mut self, key: KeyCode, mods: KeyModifiers) {
+        // Help overlay: dismiss only (second q after close will quit)
+        if self.show_help {
+            match key {
+                KeyCode::Char('?') | KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                    self.show_help = false;
+                    self.status = if key == KeyCode::Char('q') {
+                        "Help closed · press q again to quit".into()
+                    } else {
+                        "Help closed".into()
+                    };
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.searching {
             match key {
                 KeyCode::Esc => {
                     self.searching = false;
+                    self.search.clear();
+                    self.rebuild_functions();
+                    self.status = "Search cleared".into();
                 }
                 KeyCode::Enter => {
                     self.searching = false;
                     self.rebuild_functions();
+                    self.status = if self.search.is_empty() {
+                        "Search closed".into()
+                    } else {
+                        format!("Filter: {} ({} matches)", self.search, self.fn_list.len())
+                    };
                 }
                 KeyCode::Backspace => {
                     self.search.pop();
@@ -387,12 +614,20 @@ impl App {
             return;
         }
 
+        // ? always available
+        if key == KeyCode::Char('?') {
+            self.show_help = true;
+            self.error = None;
+            return;
+        }
+
         if self.screen == Screen::Setup {
             match key {
-                KeyCode::Char('q') if mods.contains(KeyModifiers::CONTROL) => {
-                    self.should_quit = true;
+                KeyCode::Char('q') => self.should_quit = true,
+                KeyCode::Esc => {
+                    // do not silent-quit on esc in setup; show hint
+                    self.status = "Press q to quit · enter to load".into();
                 }
-                KeyCode::Esc | KeyCode::Char('q') => self.should_quit = true,
                 KeyCode::Enter => {
                     let input = self.setup_input.clone();
                     if input.trim().is_empty() {
@@ -400,6 +635,8 @@ impl App {
                     } else if let Err(e) = self.load_from(&input).await {
                         self.error = Some(format!("{e:#}"));
                         self.status = "Load failed".into();
+                    } else {
+                        self.error = None;
                     }
                 }
                 KeyCode::Backspace => {
@@ -407,6 +644,7 @@ impl App {
                 }
                 KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
                     self.setup_input.push(c);
+                    self.error = None;
                 }
                 _ => {}
             }
@@ -414,23 +652,51 @@ impl App {
         }
 
         match key {
-            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-            KeyCode::Tab => self.next_screen(),
-            KeyCode::BackTab => self.prev_screen(),
-            KeyCode::Char('1') => self.screen = Screen::Overview,
-            KeyCode::Char('2') => self.screen = Screen::Priorities,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => {
+                // Soft escape: clear error / go overview, do not quit
+                if self.error.take().is_some() {
+                    self.status = "Error dismissed".into();
+                } else if self.screen != Screen::Overview {
+                    self.screen = Screen::Overview;
+                    self.status = "Overview · press q to quit".into();
+                } else {
+                    self.status = "Press q to quit · ? for help".into();
+                }
+            }
+            KeyCode::Tab => {
+                self.next_screen().await;
+            }
+            KeyCode::BackTab => {
+                self.prev_screen().await;
+            }
+            KeyCode::Char('1') => {
+                self.screen = Screen::Overview;
+                self.status = "Overview".into();
+            }
+            KeyCode::Char('2') => {
+                self.screen = Screen::Priorities;
+                self.rebuild_priorities();
+                self.status = format!("Priorities · {}", self.priority_mode.label());
+            }
             KeyCode::Char('3') => {
                 self.screen = Screen::Detail;
                 self.load_selected_detail().await;
+                self.status = "Detail".into();
             }
             KeyCode::Char('4') => {
                 self.rebuild_prompt();
                 self.screen = Screen::Prompt;
+                self.status = "Prompt · press c to copy".into();
             }
-            KeyCode::Char('5') => self.screen = Screen::Claims,
+            KeyCode::Char('5') => {
+                self.screen = Screen::Claims;
+                self.status = format!("Claims · {}", self.claims_status);
+            }
             KeyCode::Char('/') => {
                 self.searching = true;
                 self.screen = Screen::Overview;
+                self.status = "Search mode · type to filter functions".into();
             }
             KeyCode::Char('c') => self.copy_prompt(),
             KeyCode::Char('b') => self.toggle_batch_selected(),
@@ -448,6 +714,11 @@ impl App {
                     PriorityMode::Biggest => PriorityMode::Nearly,
                 };
                 self.rebuild_priorities();
+                self.status = format!(
+                    "Priority mode: {} ({} rows)",
+                    self.priority_mode.label(),
+                    self.priority_list.len()
+                );
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1).await,
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1).await,
@@ -467,6 +738,7 @@ impl App {
                                 self.selected_id = Some(db.functions[idx].id.clone());
                                 self.screen = Screen::Detail;
                                 self.load_selected_detail().await;
+                                self.status = "Opened from priorities".into();
                             }
                         }
                     }
@@ -474,6 +746,7 @@ impl App {
                     self.sync_selection_from_fn();
                     self.screen = Screen::Detail;
                     self.load_selected_detail().await;
+                    self.status = "Opened function detail".into();
                 }
             }
             KeyCode::PageUp if self.screen == Screen::Prompt => {
@@ -486,16 +759,45 @@ impl App {
         }
     }
 
-    fn next_screen(&mut self) {
+    async fn next_screen(&mut self) {
         let tabs = Screen::all_loaded();
         let i = tabs.iter().position(|s| *s == self.screen).unwrap_or(0);
         self.screen = tabs[(i + 1) % tabs.len()];
+        self.on_screen_enter().await;
     }
 
-    fn prev_screen(&mut self) {
+    async fn prev_screen(&mut self) {
         let tabs = Screen::all_loaded();
         let i = tabs.iter().position(|s| *s == self.screen).unwrap_or(0);
         self.screen = tabs[(i + tabs.len() - 1) % tabs.len()];
+        self.on_screen_enter().await;
+    }
+
+    async fn on_screen_enter(&mut self) {
+        match self.screen {
+            Screen::Detail => {
+                self.load_selected_detail().await;
+                self.status = "Detail · b batch · c copy · ? help".into();
+            }
+            Screen::Prompt => {
+                self.rebuild_prompt();
+                self.status = "Prompt · c copy · j/k scroll · ? help".into();
+            }
+            Screen::Priorities => {
+                self.rebuild_priorities();
+                self.status = format!(
+                    "Priorities · {} · n cycle · ? help",
+                    self.priority_mode.label()
+                );
+            }
+            Screen::Claims => {
+                self.status = format!("Claims · {} · r refresh · ? help", self.claims_status);
+            }
+            Screen::Overview => {
+                self.status = "Overview · j/k functions · h/l modules · enter open · ? help".into();
+            }
+            Screen::Setup => {}
+        }
     }
 
     fn move_module(&mut self, delta: isize) {
@@ -547,7 +849,7 @@ impl App {
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(5),
-                Constraint::Length(3),
+                Constraint::Length(5), // status + two key rows always visible
             ])
             .split(area);
 
@@ -561,6 +863,10 @@ impl App {
             Screen::Claims => self.draw_claims(f, chunks[1]),
         }
         self.draw_footer(f, chunks[2]);
+
+        if self.show_help {
+            self.draw_help_overlay(f, area);
+        }
     }
 
     fn draw_header(&self, f: &mut Frame, area: Rect) {
@@ -572,13 +878,13 @@ impl App {
                 db.stats.total_functions,
                 format_pct(db.stats.matched_functions, db.stats.total_functions),
                 if db.generated_at.is_empty() {
-                    "?"
+                    "—"
                 } else {
                     db.generated_at.as_str()
                 }
             )
         } else {
-            " chaos  ·  Chaos Viewer CLI".into()
+            " chaos  ·  Chaos Viewer CLI  ·  press ? for help".into()
         };
 
         let block = Block::default()
@@ -588,7 +894,7 @@ impl App {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        if self.screen == Screen::Setup {
+        if self.screen == Screen::Setup || self.db.is_none() {
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     title,
@@ -602,7 +908,7 @@ impl App {
         }
 
         let tabs = Screen::all_loaded();
-        let titles: Vec<Line> = tabs.iter().map(|s| Line::from(s.title())).collect();
+        let titles: Vec<Line> = tabs.iter().map(|s| Line::from(s.tab_label())).collect();
         let selected = tabs.iter().position(|s| *s == self.screen).unwrap_or(0);
         let header_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -620,6 +926,7 @@ impl App {
         f.render_widget(
             Tabs::new(titles)
                 .select(selected)
+                .divider(" │ ")
                 .style(Style::default().fg(self.theme.muted))
                 .highlight_style(
                     Style::default()
@@ -631,31 +938,85 @@ impl App {
     }
 
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
-        let hints = if self.screen == Screen::Setup {
-            "enter load  ·  q quit"
+        let (status_text, status_style) = if let Some(err) = &self.error {
+            (
+                format!("error · {err}"),
+                Style::default()
+                    .fg(self.theme.error)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else if self.searching {
-            "type to filter  ·  enter/esc done"
+            (
+                format!(
+                    "search · {}_  ·  {} matches",
+                    self.search,
+                    self.fn_list.len()
+                ),
+                Style::default().fg(self.theme.accent),
+            )
         } else {
-            "tab screens  ·  j/k move  ·  / search  ·  b batch  ·  c copy  ·  r claims  ·  q quit"
+            (self.status.clone(), Style::default().fg(self.theme.text))
         };
-        let status = if let Some(err) = &self.error {
-            format!("error: {err}")
-        } else if self.searching {
-            format!("search: {}_", self.search)
-        } else {
-            self.status.clone()
-        };
+
         let block = Block::default()
+            .title(" controls ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.border))
             .style(Style::default().bg(self.theme.panel));
         let inner = block.inner(area);
         f.render_widget(block, area);
-        let lines = vec![
-            Line::from(Span::styled(status, Style::default().fg(self.theme.text))),
-            Line::from(Span::styled(hints, Style::default().fg(self.theme.muted))),
-        ];
-        f.render_widget(Paragraph::new(lines), inner);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(status_text, status_style))),
+            rows[0],
+        );
+        f.render_widget(
+            Paragraph::new(key_line(&self.theme, &self.global_hints())),
+            rows[1],
+        );
+        let ctx = self.context_hints();
+        if ctx.is_empty() {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "this screen · (see ? for full map)",
+                    Style::default().fg(self.theme.muted),
+                ))),
+                rows[2],
+            );
+        } else {
+            f.render_widget(Paragraph::new(key_line(&self.theme, &ctx)), rows[2]);
+        }
+    }
+
+    fn draw_help_overlay(&self, f: &mut Frame, area: Rect) {
+        let w = area.width.saturating_sub(8).min(78);
+        let h = area.height.saturating_sub(4).min(28);
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        let rect = Rect::new(x, y, w, h);
+
+        let block = Block::default()
+            .title(" help  ·  ? or esc to close ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.accent))
+            .style(Style::default().bg(self.theme.panel).fg(self.theme.text));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        f.render_widget(
+            Paragraph::new(self.help_text())
+                .style(Style::default().fg(self.theme.text))
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
     }
 
     fn draw_setup(&self, f: &mut Frame, area: Rect) {
@@ -670,6 +1031,7 @@ impl App {
         let body = format!(
             "Point chaos at any decomp project that publishes chaos-db.json.\n\n\
              Path, raw JSON URL, or GitHub repo:\n\n  > {}_\n\n\
+             Keys:  enter = load   ? = help   q = quit\n\n\
              Examples:\n  ./data/chaos-db.json\n  https://raw.githubusercontent.com/org/repo/chaos-data/chaos-db.json\n  https://github.com/org/repo",
             self.setup_input
         );
@@ -704,7 +1066,7 @@ impl App {
         let mods = List::new(mod_items)
             .block(
                 Block::default()
-                    .title(" Modules ")
+                    .title(" Modules  (h/l) ")
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(self.theme.border)),
             )
@@ -745,9 +1107,13 @@ impl App {
             })
             .collect();
         let title = if self.search.is_empty() {
-            format!(" Functions ({}) ", self.fn_list.len())
+            format!(" Functions ({})  (j/k · enter · /) ", self.fn_list.len())
         } else {
-            format!(" Functions ({}) · /{} ", self.fn_list.len(), self.search)
+            format!(
+                " Functions ({}) · filter /{}  (enter done) ",
+                self.fn_list.len(),
+                self.search
+            )
         };
         let fns = List::new(fn_items)
             .block(
@@ -769,7 +1135,7 @@ impl App {
     fn draw_priorities(&mut self, f: &mut Frame, area: Rect) {
         let Some(db) = &self.db else { return };
         let title = format!(
-            " {}  (n cycle)  ·  {} rows ",
+            " {}  ·  {} rows  ·  n cycle · enter open ",
             self.priority_mode.label(),
             self.priority_list.len()
         );
@@ -919,6 +1285,8 @@ impl App {
             format!("status: {}", self.claims_status),
             format!("locked functions: {}", self.locked_by.len()),
             String::new(),
+            "Keys: r refresh · 1-5 screens · ? help · q quit".into(),
+            String::new(),
         ];
         let mut entries: Vec<_> = self.locked_by.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
@@ -926,8 +1294,10 @@ impl App {
             lines.push(format!("{handle:16}  {id}"));
         }
         if self.locked_by.is_empty() {
-            lines.push("No active locks (or claims source unavailable).".into());
-            lines.push("Claims appear when project.claimsApi is set or CLAIMS.md exists.".into());
+            lines.push("No active locks right now.".into());
+            lines.push("Claims are optional: they appear when project.claimsApi is set,".into());
+            lines.push("or when CLAIMS.md on the repo has active rows.".into());
+            lines.push("Empty / placeholder tables are normal and not an error.".into());
         }
         f.render_widget(
             Paragraph::new(lines.join("\n")).style(Style::default().fg(self.theme.text)),
