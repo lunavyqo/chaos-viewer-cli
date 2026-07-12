@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Overview detail scroll no longer accepts offsets past the last page (`]` /
+  PgDn stop when the end of the text is already visible).
+
 ### Added
 
 - Overview **detail pane scroll**: `PgUp`/`PgDn` (page) and `[`/`]` (line);
