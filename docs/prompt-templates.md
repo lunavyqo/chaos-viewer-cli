@@ -30,16 +30,39 @@ On the **Prompt** page (`4`):
 | Key | Action |
 |-----|--------|
 | `t` | Next template |
+| `n` | **New** template: type an id, Enter → creates a chaos-viewer copy and opens the editor |
 | `Shift+t` | Save current as default |
 | `c` | Copy rendered prompt |
 
 Title shows the template name; `★` means it is the saved default.
+
+### New template flow
+
+1. Press **`n`** on Prompt.
+2. Edit the id (default `my-template`; letters, digits, `-`, `_` only).
+3. **Enter** writes `~/.config/chaos/templates/<id>.toml` as an editable copy of the
+   built-in chaos-viewer layout, then opens it in your editor.
+4. Save and quit the editor. Chaos reloads the list and selects your new id.
+
+Editor resolution: **`$VISUAL`**, then **`$EDITOR`**, then **`nano`**.
+
+Examples:
+
+```bash
+export EDITOR=vim
+export VISUAL='code -w'   # VS Code, wait until closed
+```
 
 ## CLI
 
 ```bash
 chaos prompt --id 'arm9:0x02000000' --repo https://github.com/you/decomp
 chaos prompt --id '…' --template short
+
+# Create + open in editor (same scaffold as TUI n)
+chaos templates new my-style
+chaos templates new my-style --name "My style"
+chaos templates new my-style --no-edit   # only write the file
 ```
 
 ## User template format (TOML)

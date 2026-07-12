@@ -96,6 +96,17 @@ enum TemplatesCmd {
         /// Template id (omit to print current default)
         id: Option<String>,
     },
+    /// Create a new template (copy of chaos-viewer) and open it in $EDITOR / nano
+    New {
+        /// Template id (file stem), e.g. my-style
+        id: String,
+        /// Display name (defaults to id)
+        #[arg(long)]
+        name: Option<String>,
+        /// Create the file but do not open an editor
+        #[arg(long)]
+        no_edit: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -314,6 +325,20 @@ async fn main() -> Result<()> {
                     store.set_default(&id)?;
                     println!("default_template = {id}");
                     println!("wrote {}", store.config_path.display());
+                }
+                TemplatesCmd::New { id, name, no_edit } => {
+                    let path = store.create_from_builtin(&id, name.as_deref())?;
+                    println!("created {}", path.display());
+                    println!(
+                        "editor: {}",
+                        chaos_viewer_cli::templates::preferred_editor()
+                    );
+                    if !no_edit {
+                        chaos_viewer_cli::templates::open_in_editor(&path)?;
+                        println!("saved — run `chaos templates list` to see it");
+                    } else {
+                        println!("skipped editor (--no-edit); open the file yourself when ready");
+                    }
                 }
             }
         }
