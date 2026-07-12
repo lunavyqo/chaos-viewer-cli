@@ -5,6 +5,7 @@ pub mod clipboard;
 pub mod discover;
 pub mod load;
 pub mod prioritize;
+pub mod projects;
 pub mod prompt;
 pub mod schema;
 pub mod templates;

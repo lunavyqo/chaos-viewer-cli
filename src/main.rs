@@ -11,6 +11,7 @@ use chaos_viewer_cli::load::{
     details_base_from_source, load_chaos_db, load_function_detail, DetailCache,
 };
 use chaos_viewer_cli::prioritize::{priority_rows, PriorityMode};
+use chaos_viewer_cli::projects::{ProjectProfile, ProjectStore};
 use chaos_viewer_cli::prompt::PromptOptions;
 use chaos_viewer_cli::schema::format_pct;
 use chaos_viewer_cli::templates::TemplateStore;
@@ -39,6 +40,10 @@ struct Cli {
     /// Branch override for --repo discovery
     #[arg(long, global = true)]
     branch: Option<String>,
+
+    /// Saved project profile id (`chaos projects list`)
+    #[arg(long, global = true, env = "CHAOS_PROJECT")]
+    project: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -78,11 +83,45 @@ enum Commands {
         #[command(subcommand)]
         cmd: TemplatesCmd,
     },
+    /// Saved multi-repo profiles (~/.config/chaos/projects.toml)
+    Projects {
+        #[command(subcommand)]
+        cmd: ProjectsCmd,
+    },
     /// Talk to the project's claims coordinator (any compatible API)
     Claims {
         #[command(subcommand)]
         cmd: ClaimsCmd,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectsCmd {
+    /// List saved projects
+    List,
+    /// Show projects.toml path
+    Dir,
+    /// Add or update a project profile
+    Add {
+        /// Profile id (letters/digits/-/_)
+        id: String,
+        /// Path, raw JSON URL, or GitHub repo URL
+        #[arg(long)]
+        source: String,
+        /// Display name (defaults to id)
+        #[arg(long)]
+        name: Option<String>,
+        /// Branch for GitHub discovery
+        #[arg(long)]
+        branch: Option<String>,
+        /// Mark as active (resume on next `chaos` launch)
+        #[arg(long)]
+        use_now: bool,
+    },
+    /// Remove a saved project
+    Remove { id: String },
+    /// Set active project (loaded by default in the TUI)
+    Use { id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -177,14 +216,21 @@ async fn main() -> Result<()> {
     let command = cli.command.take().unwrap_or(Commands::Tui);
     match command {
         Commands::Tui => {
-            tui::run(cli.input.clone(), cli.repo.clone(), cli.branch.clone()).await?;
+            tui::run(
+                cli.input.clone(),
+                cli.repo.clone(),
+                cli.branch.clone(),
+                cli.project.clone(),
+            )
+            .await?;
         }
         Commands::Stats => {
+            let (input, repo, branch) = resolve_atlas_args(&cli)?;
             let (db, source) = load_chaos_db(
                 &client,
-                cli.input.as_deref(),
-                cli.repo.as_deref(),
-                cli.branch.as_deref(),
+                input.as_deref(),
+                repo.as_deref(),
+                branch.as_deref(),
             )
             .await?;
             println!("source:          {}", source.display());
@@ -211,11 +257,12 @@ async fn main() -> Result<()> {
             }
         }
         Commands::List { priority, limit } => {
+            let (input, repo, branch) = resolve_atlas_args(&cli)?;
             let (db, _) = load_chaos_db(
                 &client,
-                cli.input.as_deref(),
-                cli.repo.as_deref(),
-                cli.branch.as_deref(),
+                input.as_deref(),
+                repo.as_deref(),
+                branch.as_deref(),
             )
             .await?;
             let (claims, _) = load_claims(
@@ -246,11 +293,12 @@ async fn main() -> Result<()> {
             out,
             copy,
         } => {
+            let (input, repo, branch) = resolve_atlas_args(&cli)?;
             let (db, source) = load_chaos_db(
                 &client,
-                cli.input.as_deref(),
-                cli.repo.as_deref(),
-                cli.branch.as_deref(),
+                input.as_deref(),
+                repo.as_deref(),
+                branch.as_deref(),
             )
             .await?;
             let fn_ = db
@@ -360,12 +408,97 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Projects { cmd } => {
+            let mut store = ProjectStore::load();
+            match cmd {
+                ProjectsCmd::List => {
+                    println!("file: {}", store.path.display());
+                    println!("active: {}", store.active_id.as_deref().unwrap_or("(none)"));
+                    println!();
+                    if store.projects.is_empty() {
+                        println!("(no saved projects)");
+                        println!("Add with: chaos projects add <id> --source <path|url|github>");
+                    } else {
+                        for p in &store.projects {
+                            let mark = if store.active_id.as_deref() == Some(p.id.as_str()) {
+                                "*"
+                            } else {
+                                " "
+                            };
+                            let branch = p
+                                .branch
+                                .as_ref()
+                                .map(|b| format!("  branch={b}"))
+                                .unwrap_or_default();
+                            println!("{mark} {:<16}  {}{branch}", p.id, p.source);
+                            if p.name != p.id {
+                                println!("    name: {}", p.name);
+                            }
+                        }
+                    }
+                }
+                ProjectsCmd::Dir => {
+                    println!("{}", store.path.display());
+                }
+                ProjectsCmd::Add {
+                    id,
+                    source,
+                    name,
+                    branch,
+                    use_now,
+                } => {
+                    let name = name.unwrap_or_else(|| id.clone());
+                    store.upsert(ProjectProfile {
+                        id: id.clone(),
+                        name,
+                        source,
+                        branch,
+                    })?;
+                    if use_now {
+                        store.set_active(Some(&id))?;
+                        println!("active → {id}");
+                    }
+                    println!("saved {id} → {}", store.path.display());
+                }
+                ProjectsCmd::Remove { id } => {
+                    if store.remove(&id)? {
+                        println!("removed {id}");
+                    } else {
+                        bail!("unknown project '{id}'");
+                    }
+                }
+                ProjectsCmd::Use { id } => {
+                    store.set_active(Some(&id))?;
+                    println!("active_project = {id}");
+                }
+            }
+        }
         Commands::Claims { cmd } => {
             run_claims(&client, &cli, cmd).await?;
         }
     }
 
     Ok(())
+}
+
+/// Resolve --project profile into input/repo/branch, else use CLI flags.
+fn resolve_atlas_args(cli: &Cli) -> Result<(Option<String>, Option<String>, Option<String>)> {
+    if let Some(pid) = cli.project.as_deref() {
+        let store = ProjectStore::load();
+        let p = store
+            .get(pid)
+            .with_context(|| format!("unknown project '{pid}' (chaos projects list)"))?;
+        let source = p.source.clone();
+        let branch = p.branch.clone().or_else(|| cli.branch.clone());
+        if source.contains("github.com/")
+            && !source.contains("raw.githubusercontent.com")
+            && !source.ends_with(".json")
+        {
+            return Ok((None, Some(source), branch));
+        }
+        return Ok((Some(source), None, None));
+    }
+    Ok((cli.input.clone(), cli.repo.clone(), cli.branch.clone()))
 }
 
 async fn resolve_claims_api(
@@ -376,13 +509,9 @@ async fn resolve_claims_api(
     if let Some(api) = api_flag.filter(|s| !s.is_empty()) {
         return Ok(api);
     }
-    let (db, _) = load_chaos_db(
-        client,
-        cli.input.as_deref(),
-        cli.repo.as_deref(),
-        cli.branch.as_deref(),
-    )
-    .await?;
+    let (input, repo, branch) = resolve_atlas_args(cli)?;
+    let (db, _) =
+        load_chaos_db(client, input.as_deref(), repo.as_deref(), branch.as_deref()).await?;
     db.project
         .as_ref()
         .and_then(|p| p.claims_api.clone())

@@ -15,7 +15,7 @@ Private early development. Binary name: `chaos`.
 ## Features (MVP)
 
 - Load atlas data from a local path, raw JSON URL, or GitHub repo (probes the same
-  locations as the web viewer)
+  locations as the web viewer); **multiple saved projects** with switch / resume
 - Overview: modules + functions on top, **detail pane** underneath; **`m`**
   filters all / unmatched only / matched only
 - **Heatmap** tab: view-only squarified byte treemap (same layout math as
@@ -46,6 +46,12 @@ chaos
 chaos --input path/to/chaos-db.json
 chaos --input https://example.com/chaos-db.json
 chaos --repo https://github.com/you/your-decomp
+
+# Multi-repo profiles (saved under ~/.config/chaos/projects.toml)
+chaos projects add sm64ds --source https://github.com/you/sm64ds-decomp --use-now
+chaos projects list
+chaos --project sm64ds
+# TUI: p opens the projects hub; active project resumes on next launch
 
 # Non-interactive
 chaos stats --input path/to/chaos-db.json

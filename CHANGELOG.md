@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Multi-repo projects**: save path/URL/GitHub profiles in
+  `~/.config/chaos/projects.toml`; TUI hub (**`p`**) to switch/add/delete;
+  resume last active project on launch; CLI `chaos projects …` and
+  `--project` / `CHAOS_PROJECT`. See `docs/projects.md`.
 - **Prompt templates**: built-in `chaos-viewer` plus user TOML files under
   `~/.config/chaos/templates/`. TUI Prompt: `t` cycle, **`n` new**, **`e` edit**
   (open `$VISUAL`/`$EDITOR`/nano), `Shift+t` set default. CLI:
