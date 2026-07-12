@@ -13,7 +13,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
@@ -69,20 +69,37 @@ struct KeyHint {
     action: &'static str,
 }
 
+/// Full style replace (ratatui styles *patch*; incomplete styles leak across list rows).
+fn paint(fg: Color) -> Style {
+    Style::reset().fg(fg).bg(Color::Reset)
+}
+
+fn paint_bold(fg: Color) -> Style {
+    Style::reset()
+        .fg(fg)
+        .bg(Color::Reset)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn paint_selected(theme: &Theme) -> Style {
+    Style::reset()
+        .fg(theme.accent)
+        .bg(theme.panel)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn paint_list_base(theme: &Theme) -> Style {
+    Style::reset().fg(theme.text).bg(Color::Reset)
+}
+
 fn key_line(theme: &Theme, hints: &[KeyHint]) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, h) in hints.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled("  ", Style::default().fg(theme.muted)));
+            spans.push(Span::styled("  ", paint(theme.muted)));
         }
-        spans.push(Span::styled(
-            h.key.to_string(),
-            Style::default().fg(theme.key).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!(" {}", h.action),
-            Style::default().fg(theme.muted),
-        ));
+        spans.push(Span::styled(h.key.to_string(), paint_bold(theme.key)));
+        spans.push(Span::styled(format!(" {}", h.action), paint(theme.muted)));
     }
     Line::from(spans)
 }
@@ -580,11 +597,10 @@ Press ? or esc to close help."#
         if let Some(n) = self.batch_index(id) {
             vec![Span::styled(
                 format!("[B{n}] "),
-                Style::default()
-                    .fg(self.theme.batch)
-                    .add_modifier(Modifier::BOLD),
+                paint_bold(self.theme.batch),
             )]
         } else {
+            // Keep column alignment stable when some rows are batched.
             Vec::new()
         }
     }
@@ -1101,7 +1117,11 @@ Press ? or esc to close help."#
                     .iter()
                     .filter(|f| f.module == *m && f.matched)
                     .count();
-                ListItem::new(format!("{m}  {matched}/{total}"))
+                ListItem::new(Line::from(Span::styled(
+                    format!("{m}  {matched}/{total}"),
+                    paint(self.theme.text),
+                )))
+                .style(paint_list_base(&self.theme))
             })
             .collect();
         let mods = List::new(mod_items)
@@ -1109,14 +1129,11 @@ Press ? or esc to close help."#
                 Block::default()
                     .title(" Modules  (h/l) ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(self.theme.border)),
+                    .border_style(paint(self.theme.border))
+                    .style(paint_list_base(&self.theme)),
             )
-            .highlight_style(
-                Style::default()
-                    .bg(self.theme.panel)
-                    .fg(self.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .style(paint_list_base(&self.theme))
+            .highlight_style(paint_selected(&self.theme))
             .highlight_symbol("› ");
         f.render_stateful_widget(mods, cols[0], &mut self.module_state);
 
@@ -1134,31 +1151,28 @@ Press ? or esc to close help."#
                 } else {
                     "U"
                 };
-                let color = if f.matched {
+                let badge_color = if f.matched {
                     self.theme.matched
                 } else if self.locked_by.contains_key(&f.id) {
                     self.theme.claim
+                } else if f.div.is_some() {
+                    self.theme.key // near-miss: warm accent
                 } else {
                     self.theme.unmatched
                 };
                 let in_batch = self.batch_index(&f.id).is_some();
                 let name_style = if in_batch {
-                    Style::default()
-                        .fg(self.theme.batch)
-                        .add_modifier(Modifier::BOLD)
+                    paint_bold(self.theme.batch)
                 } else {
-                    Style::default().fg(self.theme.text)
+                    paint(self.theme.text)
                 };
-                let mut spans = vec![Span::styled(
-                    format!("[{badge}] "),
-                    Style::default().fg(color),
-                )];
+                let mut spans = vec![Span::styled(format!("[{badge}] "), paint(badge_color))];
                 spans.extend(self.batch_badge_spans(&f.id));
                 spans.push(Span::styled(
                     format!("{}  0x{:x}  {}B", f.name, f.addr, f.size),
                     name_style,
                 ));
-                ListItem::new(Line::from(spans))
+                ListItem::new(Line::from(spans)).style(paint_list_base(&self.theme))
             })
             .collect();
         let batched_visible = self
@@ -1186,14 +1200,11 @@ Press ? or esc to close help."#
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(self.theme.border)),
+                    .border_style(paint(self.theme.border))
+                    .style(paint_list_base(&self.theme)),
             )
-            .highlight_style(
-                Style::default()
-                    .bg(self.theme.panel)
-                    .fg(self.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .style(paint_list_base(&self.theme))
+            .highlight_style(paint_selected(&self.theme))
             .highlight_symbol("› ");
         f.render_stateful_widget(fns, cols[1], &mut self.fn_state);
     }
@@ -1218,18 +1229,16 @@ Press ? or esc to close help."#
                 };
                 let in_batch = self.batch_index(&f.id).is_some();
                 let name_style = if in_batch {
-                    Style::default()
-                        .fg(self.theme.batch)
-                        .add_modifier(Modifier::BOLD)
+                    paint_bold(self.theme.batch)
                 } else {
-                    Style::default().fg(self.theme.text)
+                    paint(self.theme.text)
                 };
                 let mut spans = self.batch_badge_spans(&f.id);
                 spans.push(Span::styled(
                     format!("{}  {}  0x{:x}  {extra}", f.module, f.name, f.addr),
                     name_style,
                 ));
-                ListItem::new(Line::from(spans))
+                ListItem::new(Line::from(spans)).style(paint_list_base(&self.theme))
             })
             .collect();
         let list = List::new(items)
@@ -1237,14 +1246,11 @@ Press ? or esc to close help."#
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(self.theme.border)),
+                    .border_style(paint(self.theme.border))
+                    .style(paint_list_base(&self.theme)),
             )
-            .highlight_style(
-                Style::default()
-                    .bg(self.theme.panel)
-                    .fg(self.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .style(paint_list_base(&self.theme))
+            .highlight_style(paint_selected(&self.theme))
             .highlight_symbol("› ");
         f.render_stateful_widget(list, area, &mut self.priority_state);
     }
