@@ -41,6 +41,43 @@ enum Screen {
     Claims,
 }
 
+/// Overview function list: which match states to show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum MatchFilter {
+    #[default]
+    All,
+    /// Hide matched — only still-open work.
+    UnmatchedOnly,
+    /// Hide unmatched — only finished work.
+    MatchedOnly,
+}
+
+impl MatchFilter {
+    fn cycle(self) -> Self {
+        match self {
+            Self::All => Self::UnmatchedOnly,
+            Self::UnmatchedOnly => Self::MatchedOnly,
+            Self::MatchedOnly => Self::All,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::UnmatchedOnly => "unmatched",
+            Self::MatchedOnly => "matched",
+        }
+    }
+
+    fn allows(self, matched: bool) -> bool {
+        match self {
+            Self::All => true,
+            Self::UnmatchedOnly => !matched,
+            Self::MatchedOnly => matched,
+        }
+    }
+}
+
 impl Screen {
     fn all_loaded() -> &'static [Screen] {
         &[
@@ -170,6 +207,7 @@ struct App {
     fn_list: Vec<usize>,
     fn_sel: usize,
     fn_offset: usize,
+    match_filter: MatchFilter,
     priority_mode: PriorityMode,
     priority_list: Vec<usize>,
     priority_sel: usize,
@@ -211,6 +249,7 @@ impl App {
             fn_list: Vec::new(),
             fn_sel: 0,
             fn_offset: 0,
+            match_filter: MatchFilter::All,
             priority_mode: PriorityMode::Nearly,
             priority_list: Vec::new(),
             priority_sel: 0,
@@ -294,6 +333,10 @@ impl App {
                     action: "modules",
                 },
                 KeyHint {
+                    key: "m",
+                    action: "match filter",
+                },
+                KeyHint {
                     key: "enter",
                     action: "open detail",
                 },
@@ -304,10 +347,6 @@ impl App {
                 KeyHint {
                     key: "b",
                     action: "batch",
-                },
-                KeyHint {
-                    key: "c",
-                    action: "copy prompt",
                 },
             ],
             Screen::Heatmap => Vec::new(),
@@ -391,6 +430,7 @@ GLOBAL
 OVERVIEW
   j / k       next / previous function  (also ↑ ↓)
   h / l       previous / next module    (also ← →)
+  m           cycle match filter: all → unmatched → matched
   enter       open function detail
   /           search (filter by name, module, id)
   esc         leave search
@@ -647,11 +687,14 @@ Press ? or esc to close help."#
         };
         let module = self.selected_module();
         let q = self.search.to_ascii_lowercase();
+        let filter = self.match_filter;
+        let prev_id = self.selected_id.clone();
         self.fn_list = db
             .functions
             .iter()
             .enumerate()
             .filter(|(_, f)| module.map(|m| f.module == m).unwrap_or(true))
+            .filter(|(_, f)| filter.allows(f.matched))
             .filter(|(_, f)| {
                 q.is_empty()
                     || f.name.to_ascii_lowercase().contains(&q)
@@ -660,7 +703,21 @@ Press ? or esc to close help."#
             })
             .map(|(i, _)| i)
             .collect();
-        self.fn_sel = 0;
+        // Keep the same function selected if it is still visible under the filter.
+        if let Some(id) = prev_id {
+            if let Some(list_i) = self
+                .fn_list
+                .iter()
+                .enumerate()
+                .find_map(|(i, &idx)| db.functions.get(idx).filter(|f| f.id == id).map(|_| i))
+            {
+                self.fn_sel = list_i;
+            } else {
+                self.fn_sel = 0;
+            }
+        } else {
+            self.fn_sel = 0;
+        }
         self.fn_offset = 0;
         self.sync_selection_from_fn();
     }
@@ -1020,6 +1077,15 @@ Add functions with b on Overview, Priorities, or Detail \
                     "Priority mode: {} ({} rows)",
                     self.priority_mode.label(),
                     self.priority_list.len()
+                );
+            }
+            KeyCode::Char('m') if self.screen == Screen::Overview => {
+                self.match_filter = self.match_filter.cycle();
+                self.rebuild_functions();
+                self.status = format!(
+                    "Overview filter: {} ({} functions)",
+                    self.match_filter.label(),
+                    self.fn_list.len()
                 );
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1).await,
@@ -1673,16 +1739,17 @@ Add functions with b on Overview, Priorities, or Detail \
             .iter()
             .filter(|&&idx| self.batch_index(&db.functions[idx].id).is_some())
             .count();
+        let filter = self.match_filter.label();
         let title = if self.search.is_empty() {
             format!(
-                " Functions ({})  ·  batch {} ({} here)  ·  j/k enter / b ",
+                " Functions ({}) · {filter} · batch {} ({} here) · m filter · j/k enter / b ",
                 self.fn_list.len(),
                 self.batch_summary(),
                 batched_visible
             )
         } else {
             format!(
-                " Functions ({}) · /{}  ·  batch {}  ·  enter done ",
+                " Functions ({}) · {filter} · /{} · batch {} · m · enter done ",
                 self.fn_list.len(),
                 self.search,
                 self.batch_summary()

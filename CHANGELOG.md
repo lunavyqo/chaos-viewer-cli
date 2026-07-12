@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Overview **`m` match filter**: cycle all → unmatched only → matched only
+  (hide finished or hide open work in the function list).
+
 ### Fixed
 
 - Prompt page / `c` copy no longer fall back to the Overview cursor when the
