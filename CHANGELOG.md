@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`u` update progress** in the TUI: re-fetch the current chaos-db (and claims)
   so match % / function lists stay current while you work; keeps screen, module,
   selection, and batch entries that still exist.
+- **Pluggable claims coordinator** client + CLI (`chaos claims list|try-lock|renew|release|instructions|github-exchange`).
+  Uses `project.claimsApi` (any host) or `--api`; never hardcodes a vendor.
+  Documented in `docs/claims-api.md`.
 
 ### Fixed
 

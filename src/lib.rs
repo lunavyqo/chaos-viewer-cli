@@ -9,7 +9,10 @@ pub mod prompt;
 pub mod schema;
 pub mod tui;
 
-pub use claims::{merge_locked_map, parse_claims_md, Claim, ClaimsSession};
+pub use claims::{
+    merge_locked_map, normalize_claims_api_base, parse_claims_md, Claim, ClaimsClient,
+    ClaimsSession,
+};
 pub use discover::discover_data_url;
 pub use load::{details_base_from_source, load_chaos_db, load_function_detail, DataSource};
 pub use prioritize::{priority_rows, PriorityMode};

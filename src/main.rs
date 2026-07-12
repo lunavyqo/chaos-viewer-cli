@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use chaos_viewer_cli::claims::{load_claims, merge_locked_map, ClaimsSession};
+use anyhow::{bail, Context, Result};
+use chaos_viewer_cli::claims::{load_claims, merge_locked_map, ClaimsClient, ClaimsSession};
 use chaos_viewer_cli::clipboard::copy_text;
 use chaos_viewer_cli::load::{
     details_base_from_source, load_chaos_db, load_function_detail, DetailCache,
@@ -23,7 +23,8 @@ use reqwest::Client;
     version,
     about = "Chaos Viewer CLI — decomp progress atlas in the terminal",
     long_about = "Browse matching-decomp progress data, rank next targets, and build AI prompts.\n\
-                  Schema-compatible with tangosdev/chaos-viewer."
+                  Schema-compatible with tangosdev/chaos-viewer.\n\
+                  Claims coordinators are project-configured (any host via project.claimsApi)."
 )]
 struct Cli {
     /// Local path or raw URL to chaos-db.json
@@ -68,19 +69,77 @@ enum Commands {
         #[arg(long)]
         copy: bool,
     },
+    /// Talk to the project's claims coordinator (any compatible API)
+    Claims {
+        #[command(subcommand)]
+        cmd: ClaimsCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ClaimsCmd {
+    /// List active locks (API + CLAIMS.md)
+    List {
+        /// Override project.claimsApi (otherwise load atlas for config)
+        #[arg(long)]
+        api: Option<String>,
+    },
+    /// Print coordinator instructions (GET {claimsApi}/instructions)
+    Instructions {
+        #[arg(long)]
+        api: Option<String>,
+    },
+    /// Acquire a lock on [start, end) in a module
+    TryLock {
+        #[arg(long)]
+        module: String,
+        /// Start address (hex, with or without 0x)
+        #[arg(long)]
+        start: String,
+        /// End address (hex, half-open)
+        #[arg(long)]
+        end: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        api: Option<String>,
+    },
+    /// Renew a claim by id
+    Renew {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        api: Option<String>,
+    },
+    /// Release a claim by id
+    Release {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        api: Option<String>,
+    },
+    /// Exchange a GitHub access token for a session (if the coordinator supports it)
+    GithubExchange {
+        #[arg(long)]
+        github_token: String,
+        /// claimsApi base URL (required; no atlas load)
+        #[arg(long)]
+        api: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     let client = Client::builder()
         .user_agent("chaos-viewer-cli/0.1")
         .timeout(Duration::from_secs(30))
         .build()?;
 
-    match cli.command.unwrap_or(Commands::Tui) {
+    let command = cli.command.take().unwrap_or(Commands::Tui);
+    match command {
         Commands::Tui => {
-            tui::run(cli.input, cli.repo, cli.branch).await?;
+            tui::run(cli.input.clone(), cli.repo.clone(), cli.branch.clone()).await?;
         }
         Commands::Stats => {
             let (db, source) = load_chaos_db(
@@ -107,6 +166,11 @@ async fn main() -> Result<()> {
             );
             println!("modules:         {}", db.stats.module_count);
             println!("functions array: {}", db.functions.len());
+            if let Some(api) = db.project.as_ref().and_then(|p| p.claims_api.as_deref()) {
+                println!("claimsApi:       {api}");
+            } else {
+                println!("claimsApi:       (none — CLAIMS.md only if present)");
+            }
         }
         Commands::List { priority, limit } => {
             let (db, _) = load_chaos_db(
@@ -172,8 +236,158 @@ async fn main() -> Result<()> {
                 eprintln!("copied to clipboard");
             }
         }
+        Commands::Claims { cmd } => {
+            run_claims(&client, &cli, cmd).await?;
+        }
     }
 
+    Ok(())
+}
+
+async fn resolve_claims_api(
+    client: &Client,
+    cli: &Cli,
+    api_flag: Option<String>,
+) -> Result<String> {
+    if let Some(api) = api_flag.filter(|s| !s.is_empty()) {
+        return Ok(api);
+    }
+    let (db, _) = load_chaos_db(
+        client,
+        cli.input.as_deref(),
+        cli.repo.as_deref(),
+        cli.branch.as_deref(),
+    )
+    .await?;
+    db.project
+        .as_ref()
+        .and_then(|p| p.claims_api.clone())
+        .filter(|s| !s.is_empty())
+        .context(
+            "no claimsApi in project config; pass --api https://host/api/claims \
+             or publish project.claimsApi in chaos-db.json",
+        )
+}
+
+fn require_session() -> Result<ClaimsSession> {
+    ClaimsSession::from_env().context(
+        "set CHAOS_CLAIMS_API_KEY (or CHAOS_CLAIMS_SESSION / CHAOS_CLAIMS_KEY) \
+         and optionally CHAOS_CLAIMS_HANDLE",
+    )
+}
+
+fn parse_addr(s: &str) -> Result<u64> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).with_context(|| format!("bad hex address: {s}"))
+    } else if s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 6 {
+        u64::from_str_radix(s, 16).with_context(|| format!("bad hex address: {s}"))
+    } else {
+        s.parse::<u64>()
+            .with_context(|| format!("bad address: {s}"))
+    }
+}
+
+async fn run_claims(client: &Client, cli: &Cli, cmd: ClaimsCmd) -> Result<()> {
+    match cmd {
+        ClaimsCmd::List { api } => {
+            let api = resolve_claims_api(client, cli, api).await.ok();
+            let github = if cli.repo.is_some() || cli.input.is_some() {
+                load_chaos_db(
+                    client,
+                    cli.input.as_deref(),
+                    cli.repo.as_deref(),
+                    cli.branch.as_deref(),
+                )
+                .await
+                .ok()
+                .and_then(|(db, _)| {
+                    db.project.and_then(|p| {
+                        if p.github.is_empty() {
+                            None
+                        } else {
+                            Some(p.github)
+                        }
+                    })
+                })
+            } else {
+                None
+            };
+            let (claims, live) = load_claims(client, api.as_deref(), github.as_deref()).await?;
+            println!(
+                "source: {} · {} claim(s)",
+                if live { "live" } else { "unavailable" },
+                claims.len()
+            );
+            if let Some(a) = &api {
+                println!("claimsApi: {a}");
+            }
+            for c in &claims {
+                println!(
+                    "{:12}  0x{:08x}-0x{:08x}  {}  {}",
+                    c.module,
+                    c.start.to_u64(),
+                    c.end.to_u64(),
+                    c.handle.as_deref().unwrap_or("-"),
+                    c.id.as_deref().unwrap_or("-"),
+                );
+            }
+        }
+        ClaimsCmd::Instructions { api } => {
+            let api = resolve_claims_api(client, cli, api).await?;
+            let cc = ClaimsClient::new(client.clone(), &api);
+            println!("{}", cc.instructions().await?);
+        }
+        ClaimsCmd::TryLock {
+            module,
+            start,
+            end,
+            note,
+            api,
+        } => {
+            let api = resolve_claims_api(client, cli, api).await?;
+            let session = require_session()?;
+            let start = parse_addr(&start)?;
+            let end = parse_addr(&end)?;
+            if end <= start {
+                bail!("end must be > start (half-open range)");
+            }
+            let cc = ClaimsClient::new(client.clone(), &api);
+            let resp = cc
+                .try_lock(&session, &module, start, end, note.as_deref())
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&resp.claim)?);
+            if let Some(id) = resp.claim.as_ref().and_then(|c| c.id.as_ref()) {
+                eprintln!("locked id={id} as {}", session.handle);
+            }
+        }
+        ClaimsCmd::Renew { id, api } => {
+            let api = resolve_claims_api(client, cli, api).await?;
+            let session = require_session()?;
+            let cc = ClaimsClient::new(client.clone(), &api);
+            let resp = cc.renew(&session, &id).await?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            eprintln!("renewed {id}");
+        }
+        ClaimsCmd::Release { id, api } => {
+            let api = resolve_claims_api(client, cli, api).await?;
+            let session = require_session()?;
+            let cc = ClaimsClient::new(client.clone(), &api);
+            let resp = cc.release(&session, &id).await?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            eprintln!("released {id}");
+        }
+        ClaimsCmd::GithubExchange { github_token, api } => {
+            let cc = ClaimsClient::new(client.clone(), &api);
+            let session = cc.exchange_github_token(&github_token).await?;
+            println!("export CHAOS_CLAIMS_SESSION='{}'", session.token);
+            println!("export CHAOS_CLAIMS_HANDLE='{}'", session.handle);
+            eprintln!(
+                "session ready for handle={} (paste exports into your shell)",
+                session.handle
+            );
+        }
+    }
     Ok(())
 }
 

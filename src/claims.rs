@@ -1,15 +1,20 @@
-//! Claims API polling and CLAIMS.md parsing.
+//! Generic claims coordination: CLAIMS.md + any HTTP claims API.
+//!
+//! The CLI does **not** hardcode a host (belongto.us is just one provider).
+//! The project publishes `project.claimsApi` (and optionally `claimsAuthUrl`);
+//! we speak the chaos-viewer-compatible contract against that base URL.
+//! See `docs/claims-api.md`.
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::discover::parse_github;
 use crate::schema::ChaosFunction;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claim {
     pub id: Option<String>,
     pub module: String,
@@ -19,7 +24,7 @@ pub struct Claim {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AddrValue {
     Num(u64),
@@ -44,26 +49,259 @@ impl AddrValue {
 
 #[derive(Debug, Clone, Default)]
 pub struct ClaimsSession {
+    /// Secret for `X-Api-Key` (Discord long-lived key or short-lived session).
     pub token: String,
+    /// Display handle used on try-lock / renew / release bodies.
     pub handle: String,
 }
 
 impl ClaimsSession {
+    /// Read credentials from the environment (any coordinator).
+    ///
+    /// Token (first non-empty wins):
+    /// - `CHAOS_CLAIMS_SESSION`
+    /// - `CHAOS_CLAIMS_API_KEY`
+    /// - `CHAOS_CLAIMS_KEY`
+    ///
+    /// Handle: `CHAOS_CLAIMS_HANDLE` (default `chaos-viewer-user`).
     pub fn from_env() -> Option<Self> {
-        let token = std::env::var("CHAOS_CLAIMS_SESSION").ok()?;
-        if token.is_empty() {
-            return None;
-        }
+        let token = [
+            "CHAOS_CLAIMS_SESSION",
+            "CHAOS_CLAIMS_API_KEY",
+            "CHAOS_CLAIMS_KEY",
+        ]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))?;
         let handle =
             std::env::var("CHAOS_CLAIMS_HANDLE").unwrap_or_else(|_| "chaos-viewer-user".into());
         Some(Self { token, handle })
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct ClaimsApiResponse {
+/// Strip trailing slashes so `${base}/try-lock` is well-formed.
+pub fn normalize_claims_api_base(api: &str) -> String {
+    api.trim().trim_end_matches('/').to_string()
+}
+
+/// Client for a project-configured claims coordinator (any host).
+#[derive(Debug, Clone)]
+pub struct ClaimsClient {
+    pub base: String,
+    client: Client,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TryLockRequest {
+    pub module: String,
+    pub start: String,
+    pub end: String,
+    pub handle: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HandleBody {
+    pub handle: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteResponse {
+    pub ok: Option<bool>,
+    pub error: Option<String>,
+    pub claim: Option<Claim>,
     #[serde(default)]
-    claims: Vec<Claim>,
+    pub conflicts: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GithubTokenExchangeResponse {
+    pub ok: Option<bool>,
+    pub session: Option<String>,
+    pub handle: Option<String>,
+    pub error: Option<String>,
+}
+
+impl ClaimsClient {
+    pub fn new(client: Client, claims_api: &str) -> Self {
+        Self {
+            base: normalize_claims_api_base(claims_api),
+            client,
+        }
+    }
+
+    /// Infer coordinator origin for auth helpers (`…/auth/github/token`).
+    ///
+    /// If `claimsApi` is `https://host/api/claims`, origin is `https://host`.
+    pub fn origin(&self) -> String {
+        if let Some(idx) = self.base.find("/api/claims") {
+            self.base[..idx].trim_end_matches('/').to_string()
+        } else {
+            self.base.clone()
+        }
+    }
+
+    pub async fn list(&self) -> Result<Vec<Claim>> {
+        let resp = self
+            .client
+            .get(&self.base)
+            .send()
+            .await
+            .with_context(|| format!("GET {}", self.base))?
+            .error_for_status()
+            .with_context(|| format!("HTTP error for {}", self.base))?;
+        let v: serde_json::Value = resp.json().await.context("parse claims list JSON")?;
+        parse_claims_json_value(&v)
+    }
+
+    pub async fn instructions(&self) -> Result<String> {
+        // Prefer `${base}/instructions` (e.g. /api/claims/instructions).
+        let url = format!("{}/instructions", self.base);
+        let resp = self.client.get(&url).send().await;
+        if let Ok(r) = resp {
+            if r.status().is_success() {
+                return r.text().await.context("read instructions body");
+            }
+        }
+        Ok(format!(
+            "No instructions document at {url}.\n\
+             Generic contract: GET {base} lists locks; POST {base}/try-lock, \
+             POST {base}/{{id}}/renew, POST {base}/{{id}}/release with X-Api-Key.\n\
+             See docs/claims-api.md in chaos-viewer-cli.",
+            base = self.base,
+            url = url,
+        ))
+    }
+
+    pub async fn try_lock(
+        &self,
+        session: &ClaimsSession,
+        module: &str,
+        start: u64,
+        end: u64,
+        note: Option<&str>,
+    ) -> Result<WriteResponse> {
+        let body = TryLockRequest {
+            module: module.to_string(),
+            start: format!("0x{start:x}"),
+            end: format!("0x{end:x}"),
+            handle: session.handle.clone(),
+            note: note.map(str::to_string),
+        };
+        self.post_json(&format!("{}/try-lock", self.base), session, &body)
+            .await
+    }
+
+    pub async fn renew(&self, session: &ClaimsSession, claim_id: &str) -> Result<WriteResponse> {
+        let body = HandleBody {
+            handle: session.handle.clone(),
+        };
+        self.post_json(&format!("{}/{claim_id}/renew", self.base), session, &body)
+            .await
+    }
+
+    pub async fn release(&self, session: &ClaimsSession, claim_id: &str) -> Result<WriteResponse> {
+        let body = HandleBody {
+            handle: session.handle.clone(),
+        };
+        self.post_json(&format!("{}/{claim_id}/release", self.base), session, &body)
+            .await
+    }
+
+    /// Optional GitHub token exchange if the coordinator implements it
+    /// (`POST {origin}/auth/github/token`). Not required for Discord API keys.
+    pub async fn exchange_github_token(&self, access_token: &str) -> Result<ClaimsSession> {
+        let url = format!("{}/auth/github/token", self.origin());
+        let resp = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({ "accessToken": access_token }))
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        let status = resp.status();
+        let body: GithubTokenExchangeResponse = resp
+            .json()
+            .await
+            .context("parse github token exchange response")?;
+        if !status.is_success() || body.ok == Some(false) {
+            bail!(
+                "github token exchange failed: {}",
+                body.error.unwrap_or_else(|| status.to_string())
+            );
+        }
+        let token = body
+            .session
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("exchange response missing session"))?;
+        let handle = body
+            .handle
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "chaos-viewer-user".into());
+        Ok(ClaimsSession { token, handle })
+    }
+
+    async fn post_json<T: Serialize>(
+        &self,
+        url: &str,
+        session: &ClaimsSession,
+        body: &T,
+    ) -> Result<WriteResponse> {
+        let resp = self
+            .client
+            .post(url)
+            .header("X-Api-Key", &session.token)
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if status.as_u16() == 401 {
+            bail!("unauthorized (401): session/API key rejected or expired");
+        }
+        let parsed: WriteResponse = serde_json::from_str(&text).unwrap_or(WriteResponse {
+            ok: Some(status.is_success()),
+            error: if status.is_success() {
+                None
+            } else {
+                Some(text.clone())
+            },
+            claim: None,
+            conflicts: None,
+        });
+        if !status.is_success() || parsed.ok == Some(false) {
+            let msg = parsed
+                .error
+                .clone()
+                .unwrap_or_else(|| format!("HTTP {status}: {text}"));
+            bail!("{msg}");
+        }
+        Ok(parsed)
+    }
+}
+
+fn parse_claims_json_value(v: &serde_json::Value) -> Result<Vec<Claim>> {
+    if let Some(arr) = v.get("claims").and_then(|c| c.as_array()) {
+        let mut out = Vec::new();
+        for item in arr {
+            if let Ok(c) = serde_json::from_value::<Claim>(item.clone()) {
+                out.push(c);
+            }
+        }
+        return Ok(out);
+    }
+    if let Some(arr) = v.as_array() {
+        let mut out = Vec::new();
+        for item in arr {
+            if let Ok(c) = serde_json::from_value::<Claim>(item.clone()) {
+                out.push(c);
+            }
+        }
+        return Ok(out);
+    }
+    Ok(Vec::new())
 }
 
 /// Parse a repo CLAIMS.md table into locks (ports web viewer logic).
@@ -93,9 +331,7 @@ pub fn parse_claims_md(text: &str) -> Vec<Claim> {
         // (Module | Range | Claimant | Date | Status | Notes).
         let (range, who, status) = if cells.len() >= 5
             && looks_like_module_cell(cells[0])
-            && (cells[1].contains("0x")
-                || cells[1].contains("0X")
-                || is_placeholder_cell(cells[1]))
+            && (cells[1].contains("0x") || cells[1].contains("0X") || is_placeholder_cell(cells[1]))
         {
             (cells[1], cells[2], cells[4])
         } else {
@@ -380,35 +616,14 @@ pub async fn load_claims(
     let mut any_live = false;
 
     if let Some(api) = claims_api.filter(|s| !s.is_empty()) {
-        let url = api.trim_end_matches('/');
-        match client.get(url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(body) = resp.json::<ClaimsApiResponse>().await {
-                    collected.extend(body.claims);
-                    any_live = true;
-                } else if let Ok(list) = client.get(url).send().await {
-                    // try raw array
-                    let _ = list;
-                }
+        let api_client = ClaimsClient::new(client.clone(), api);
+        match api_client.list().await {
+            Ok(claims) => {
+                // Empty list still counts as a live coordinator.
+                collected.extend(claims);
+                any_live = true;
             }
-            _ => {}
-        }
-        // also try parsing flexible: { ok, claims }
-        if !any_live {
-            if let Ok(resp) = client.get(url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(v) = resp.json::<serde_json::Value>().await {
-                        if let Some(arr) = v.get("claims").and_then(|c| c.as_array()) {
-                            for item in arr {
-                                if let Ok(c) = serde_json::from_value::<Claim>(item.clone()) {
-                                    collected.push(c);
-                                    any_live = true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            Err(_) => { /* try CLAIMS.md below */ }
         }
     }
 
