@@ -272,12 +272,12 @@ impl App {
             load_input: None,
             project_store,
             project_sel,
-            // Default to source input so URLs can be typed immediately (Tab for list).
-            setup_list_focus: false,
+            // Default to saved project list; Tab (or start typing) for source input.
+            setup_list_focus: true,
             saving_project: false,
             project_id_input: String::new(),
             pending_delete_id: None,
-            status: "Type a path/URL then enter · Tab for project list · Shift+s save profile"
+            status: "Project list · j/k enter · Tab or type for URL · Shift+s save · d delete"
                 .into(),
             error: None,
             db: None,
@@ -1662,7 +1662,7 @@ Add functions with b on Overview or Priorities \
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('p') => {
                 self.screen = Screen::Setup;
-                self.setup_list_focus = false;
+                self.setup_list_focus = true;
                 self.project_store.reload();
                 if let Some(id) = self.project_store.active_id.clone() {
                     if let Some(i) = self.project_store.index_of(&id) {
@@ -1670,7 +1670,8 @@ Add functions with b on Overview or Priorities \
                     }
                 }
                 self.status =
-                    "Type source URL · enter load · Tab list · Shift+s save · d delete".into();
+                    "Project list · j/k enter · Tab or type for URL · Shift+s save · d delete"
+                        .into();
             }
             KeyCode::Esc => {
                 // Soft escape: clear error / go overview, do not quit
@@ -2418,7 +2419,7 @@ Add functions with b on Overview or Priorities \
         } else if self.saving_project {
             "Enter id · enter save · esc cancel"
         } else {
-            "type URL · enter load · Tab list · j/k projects · Shift+s save · d delete · q quit"
+            "j/k list · enter load · Tab or type for URL · Shift+s save · d delete · q quit"
         };
         f.render_widget(
             Paragraph::new(help)
