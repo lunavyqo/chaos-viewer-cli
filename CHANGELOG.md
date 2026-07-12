@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   such as empty electroplankton-style `CLAIMS.md` tables; also accepts that
   layout's Module/Range/Claimant columns.
 
+### Added
+
+- **`u` update progress** in the TUI: re-fetch the current chaos-db (and claims)
+  so match % / function lists stay current while you work; keeps screen, module,
+  selection, and batch entries that still exist.
+
 ### Changed
 
 - TUI controls are always visible: numbered tabs (`1`–`5`), highlighted key hints
