@@ -10,7 +10,7 @@ Schema-compatible with that project's `ADAPTING.md` data format.
 
 ## Status
 
-Private early development. Binary name: `chaos`.
+Early development. Binary name: `chaos`.
 
 ## Features (MVP)
 
