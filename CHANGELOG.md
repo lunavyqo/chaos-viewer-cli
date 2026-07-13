@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Repository is **public** on GitHub (`lunavyqo/chaos-viewer-cli`).
+
 ### Added
 
 - Experimental **attempt logging** in the stock prompt: every matching iteration
