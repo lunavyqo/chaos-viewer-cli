@@ -571,6 +571,10 @@ impl App {
                     key: "b",
                     action: "batch",
                 },
+                KeyHint {
+                    key: "S-b",
+                    action: "clear batch",
+                },
             ],
             Screen::Heatmap => Vec::new(),
             Screen::Priorities => vec![
@@ -589,6 +593,10 @@ impl App {
                 KeyHint {
                     key: "b",
                     action: "batch",
+                },
+                KeyHint {
+                    key: "S-b",
+                    action: "clear batch",
                 },
             ],
             Screen::Prompt => vec![
@@ -616,6 +624,10 @@ impl App {
                     key: "c",
                     action: "copy",
                 },
+                KeyHint {
+                    key: "S-b",
+                    action: "clear batch",
+                },
             ],
             Screen::Claims => vec![KeyHint {
                 key: "r",
@@ -638,6 +650,7 @@ GLOBAL
   r           refresh claims only
   c           copy batch prompt to clipboard (no-op if batch empty)
   b           add/remove selected function from batch (max 16)
+  Shift+b     clear entire batch (unselect all)
               Prompt page uses the batch only (not the Overview cursor)
               batched rows show violet [B1] [B2] … badges in lists
 
@@ -649,6 +662,7 @@ OVERVIEW
   pgup/pgdn   scroll the detail pane (j/k still move the function list)
   [ / ]       scroll detail one line
   b           toggle batch for selected function
+  Shift+b     clear entire batch
 
 HEATMAP
   view-only byte map (select a function on Overview / Priorities first)
@@ -667,6 +681,7 @@ PROMPT
   e           edit current user template in $EDITOR / nano
   Shift+t     set current template as default
   c           copy batch prompt
+  Shift+b     clear entire batch
 
 SETUP / PROJECTS
   type        source path / URL / GitHub (always works; focuses the input)
@@ -1221,12 +1236,17 @@ Press ? or esc to close help."#
         };
         if let Some(n) = self.batch_index(&fn_.id) {
             format!(
-                " BATCHED [B{n}]  ·  {n}/{}  ·  b remove  ·  c copy batch ",
+                " BATCHED [B{n}]  ·  {n}/{}  ·  b remove  ·  S-b clear  ·  c copy ",
                 self.batch.len()
+            )
+        } else if self.batch.is_empty() {
+            format!(
+                " not in batch  ·  b to add ({})  ·  Prompt uses batch only ",
+                self.batch_summary()
             )
         } else {
             format!(
-                " not in batch  ·  b to add ({})  ·  Prompt uses batch only ",
+                " not in batch  ·  b to add ({})  ·  S-b clear batch ",
                 self.batch_summary()
             )
         }
@@ -1454,6 +1474,19 @@ Add functions with b on Overview or Priorities \
         }
         self.invalidate_detail_lines();
         self.rebuild_prompt().await;
+    }
+
+    /// Remove every function from the prompt batch (web “clear”).
+    async fn clear_batch(&mut self) {
+        if self.batch.is_empty() {
+            self.status = "Batch already empty".into();
+            return;
+        }
+        let n = self.batch.len();
+        self.batch.clear();
+        self.invalidate_detail_lines();
+        self.rebuild_prompt().await;
+        self.status = format!("Cleared batch · removed {n} function(s)");
     }
 
     /// 1-based position in the prompt batch, if present.
@@ -1839,6 +1872,10 @@ Add functions with b on Overview or Priorities \
                 // Ensure disasm/draft are loaded before copy (web always has detail).
                 self.rebuild_prompt().await;
                 self.copy_prompt();
+            }
+            // Shift+b = clear entire batch (plain b toggles selected).
+            KeyCode::Char('b') if mods.contains(KeyModifiers::SHIFT) => {
+                self.clear_batch().await;
             }
             KeyCode::Char('b') => self.toggle_batch_selected().await,
             KeyCode::Char('u') => {
