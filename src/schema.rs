@@ -61,74 +61,80 @@ pub struct ChaosFunction {
     pub size: u64,
     pub matched: bool,
     pub src_path: Option<String>,
-    /// Git handle / contributor label (upstream chaos-viewer contributor coloring).
+    /// Who matched it (GitHub login / contributor credit).
+    ///
+    /// Same field as classic chaos-viewer: treemap contributor colors, credit.
+    /// This is the only “who” field — do **not** put the operator in
+    /// `matchProvenance` (that object is “how” only).
     pub author: Option<String>,
     pub div: Option<u64>,
     pub cat: Option<String>,
     pub floor: Option<String>,
     pub sim: Option<f64>,
     pub sibling: Option<String>,
-    /// How this function was matched (experimental convention; optional for default).
+    /// **How** this function was matched (experimental convention; optional for default).
     ///
-    /// Generators for **experimental** profiles should set this on every matched
-    /// function. Default / sm64ds atlases omit it.
+    /// Answers method only (`human` vs `ai` + model/reasoning/harness). Credit /
+    /// “who” stays on [`Self::author`]. Generators for experimental profiles should
+    /// set this on every matched function. Default / sm64ds atlases omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_provenance: Option<MatchProvenance>,
 }
 
-/// How a function was matched — required under the **experimental** convention.
+/// **How** a function was matched — required under the **experimental** convention.
 ///
-/// Serialized as a tagged object, e.g.:
+/// “Who” is always [`ChaosFunction::author`], never this object.
+///
 /// ```json
-/// { "kind": "ai", "model": "…", "reasoning": "high", "harness": "fanout-v3" }
-/// { "kind": "human", "by": "handle" }
+/// { "kind": "ai", "model": "grok-4.5", "reasoning": "high", "harness": "grok-build" }
+/// { "kind": "human", "note": "optional" }
 /// ```
+///
+/// Legacy `by` keys inside provenance may still deserialize for old atlases but
+/// are ignored for display/completeness — use `author` instead.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum MatchProvenance {
-    /// Matched by a person (no model/harness).
+    /// Matched by a person (no model/harness). Credit → `author`.
     #[serde(rename = "human")]
     Human {
-        /// Optional handle / name of the matcher.
+        /// Deprecated: use function `author`. Kept for reading old ledgers only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
-    /// Matched with AI assistance — model, reasoning level, and harness are required
-    /// for a complete experimental record.
+    /// Matched with AI — model, reasoning, harness required for a complete record.
+    /// Operator credit → `author`, not `by`.
     #[serde(rename = "ai")]
     Ai {
-        /// Model id / name (e.g. `claude-opus-4`, `gpt-5`).
+        /// Model id slug (e.g. `claude-opus-4`, `grok-4.5`).
         model: String,
-        /// Reasoning / effort level when applicable (e.g. `high`, `medium`, `none`).
+        /// Reasoning / effort level (e.g. `high`, `medium`, `none`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning: Option<String>,
-        /// Tooling / pipeline that produced the match (e.g. `fanout-v3`, `permuter`).
+        /// Tooling / pipeline id (e.g. `fanout-v3`, `grok-build`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         harness: Option<String>,
-        /// Optional operator who ran the harness.
+        /// Deprecated: use function `author`. Kept for reading old ledgers only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<String>,
     },
 }
 
 impl MatchProvenance {
-    /// One-line summary for UI / status.
+    /// One-line summary of **method** (not who — see `author`).
     pub fn summary(&self) -> String {
         match self {
-            Self::Human { by, note } => {
-                let who = by.as_deref().unwrap_or("human");
-                match note {
-                    Some(n) if !n.is_empty() => format!("human · {who} · {n}"),
-                    _ => format!("human · {who}"),
-                }
-            }
+            Self::Human { note, .. } => match note {
+                Some(n) if !n.is_empty() => format!("human · {n}"),
+                _ => "human".into(),
+            },
             Self::Ai {
                 model,
                 reasoning,
                 harness,
-                by,
+                ..
             } => {
                 let mut parts = vec![format!("ai · model={model}")];
                 if let Some(r) = reasoning.as_ref().filter(|s| !s.is_empty()) {
@@ -137,17 +143,14 @@ impl MatchProvenance {
                 if let Some(h) = harness.as_ref().filter(|s| !s.is_empty()) {
                     parts.push(format!("harness={h}"));
                 }
-                if let Some(b) = by.as_ref().filter(|s| !s.is_empty()) {
-                    parts.push(format!("by={b}"));
-                }
                 parts.join(" · ")
             }
         }
     }
 
-    /// True when experimental rules are fully satisfied for this record.
+    /// True when experimental **how** rules are satisfied.
     ///
-    /// - **human**: always complete (optional `by`/`note`)
+    /// - **human**: complete (optional note only)
     /// - **ai**: non-empty `model`, `reasoning`, and `harness`
     pub fn is_complete(&self) -> bool {
         match self {

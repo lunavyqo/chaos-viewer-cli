@@ -53,36 +53,36 @@ This CLI is schema-compatible with
 }
 ```
 
+### Who vs how
+
+| Field | Meaning |
+|---|---|
+| **`author`** | **Who** matched it (GitHub login). Classic chaos-viewer credit / colors. |
+| **`matchProvenance`** | **How** it was matched (experimental). Method only — no operator name. |
+
+Do not put the operator in both places. Credit = `author` only.
+
 ### `matchProvenance` (experimental)
 
-Optional on **default** atlases (sm64ds / chaos-viewer ignore it). Under the
-**experimental** project convention, every **matched** function should record
-how it was matched:
+Optional on **default** atlases. Under **experimental**, every **matched**
+function should record **how** it was matched:
 
 | kind | fields |
 |---|---|
-| `"human"` | `by` recommended (GitHub login); optional `note` |
-| `"ai"` | required `model`, `reasoning`, `harness`; **`by` = operator GitHub login** (same idea as claims handle) |
+| `"human"` | optional `note` only |
+| `"ai"` | required `model`, `reasoning`, `harness` (slug tokens) |
 
-**Token form (recommended for generators / bank tools):** use slug-style ids
-with **no spaces**. Display names like `Grok 4.5` / `Grok Build` often fail
-strict validators — prefer `grok-4.5` and `grok-build`.
-
-| Field | Suggested pattern | Good | Bad |
-|---|---|---|---|
-| `model` | alnum + `._+/-` | `grok-4.5`, `claude-opus-4` | `Grok 4.5` |
-| `reasoning` | short token | `high`, `medium`, `none` | free prose |
-| `harness` | lowercase slug | `grok-build`, `fanout-v3` | `Grok Build` |
-
-Examples:
+**Token form:** no spaces — `grok-4.5`, `grok-build` (not `Grok 4.5`).
 
 ```json
-{ "kind": "human", "by": "lunavyqo" }
-{ "kind": "ai", "model": "grok-4.5", "reasoning": "high", "harness": "grok-build", "by": "op" }
+{ "matched": true, "author": "lunavyqo", "matchProvenance": { "kind": "human" } }
+{ "matched": true, "author": "lunavyqo", "matchProvenance": {
+    "kind": "ai", "model": "grok-4.5", "reasoning": "high", "harness": "grok-build"
+}}
 ```
 
-The CLI shows this on the Overview detail pane when the active profile is
-experimental, and flags matched functions that omit or incompletely fill it.
+Legacy ledgers may still contain `matchProvenance.by`; the CLI ignores it for
+credit (use `author`).
 
 ## Detail chunks (optional)
 
