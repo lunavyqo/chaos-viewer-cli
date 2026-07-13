@@ -18,7 +18,33 @@ for the right repo instead of reloading a stashed electroplankton/sm64 raw file.
 
 Suggested ids use the **repo name** (`sm64ds-decomp`), never a mangled full URL.
 
-Each profile also stores a **data-tracking convention** (see below).
+Each profile also stores a **data-tracking convention** (see below) and an
+optional **`local_repo`** path (the decomp checkout on this machine, used when
+launching Grok with `g` in the TUI).
+
+## Local decomp path (`local_repo`)
+
+Atlas `source` is often a **GitHub URL**. Grok still needs the **local clone**
+to run tools (`bank`, `log_attempt`, edit `src/`). Set it once per profile:
+
+```bash
+# Path may use ~/
+chaos projects local-repo electroplankton ~/Documents/SGH/electroplankton-decomp
+
+# Or when adding
+chaos projects add electro \
+  --source https://github.com/you/electroplankton-decomp \
+  --local-repo ~/Documents/SGH/electroplankton-decomp \
+  --convention experimental \
+  --use-now
+
+# Clear
+chaos projects local-repo electro -
+chaos projects list   # shows local_repo per profile
+```
+
+Fallback if a profile has no `local_repo`: `grok_default_repo` in
+`~/.config/chaos/config.toml`, then a heuristic from a local atlas path only.
 
 ## Conventions
 
@@ -61,11 +87,12 @@ chaos projects add my-exp --source https://github.com/you/my-repo --convention e
 chaos projects add electro --source /path/to/electroplankton/chaos-db.json
 chaos projects add ep-url --source https://raw.githubusercontent.com/…/chaos-db.json
 
-# List / select / convention
+# List / select / convention / local_repo
 chaos projects list
 chaos projects use electro
 chaos projects convention my-exp experimental
 chaos projects convention sm64ds default
+chaos projects local-repo electro ~/path/to/electroplankton-decomp
 chaos projects remove old-id
 chaos projects dir
 
@@ -84,6 +111,9 @@ export CHAOS_PROJECT=sm64ds
   - **j/k** — select saved project
   - **enter** — load selected project (or typed source if input focused)
   - **v** — cycle selected project’s convention (`default` ↔ `experimental`) and save
+  - **r** — set **local decomp path** for the selected project (Grok `g` cwd).
+    Prefills the current value; type a path (`~/…` ok), **enter** to save
+    (must be an existing directory), empty + enter clears, **esc** cancels.
   - **tab** — focus list ↔ freeform source input
   - **type** — start a source path / URL (switches focus to the input)
   - **Shift+s** — save current source as a named profile (type id, enter)
@@ -91,4 +121,5 @@ export CHAOS_PROJECT=sm64ds
   - **esc** — back to Overview if something is already loaded
 
 Header shows the active profile id and convention when loaded.
-List rows show `[default]` / `[experimental]` next to each id.
+List rows show `[default]` / `[experimental]` and `local:…` / `local:(unset)`
+next to each id.

@@ -30,6 +30,10 @@ pub struct ProjectProfile {
     /// Missing key in older `projects.toml` deserializes as Default.
     #[serde(default)]
     pub convention: Convention,
+    /// Local decomp checkout on this machine (for Grok `--cwd` / tools).
+    /// Optional; independent of `source` (which may be a GitHub URL for the atlas).
+    #[serde(default)]
+    pub local_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -251,6 +255,7 @@ mod tests {
                 source: "https://github.com/you/demo".into(),
                 branch: None,
                 convention: Convention::Default,
+                local_repo: None,
             })
             .unwrap();
         store.set_active(Some("demo")).unwrap();
@@ -283,5 +288,32 @@ source = "https://github.com/you/legacy"
         store.save().unwrap();
         let store2 = ProjectStore::load_from_home(dir.path());
         assert_eq!(store2.projects[0].convention, Convention::Experimental);
+    }
+
+    #[test]
+    fn local_repo_roundtrip_and_default_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("projects.toml");
+        fs::write(
+            &path,
+            r#"
+[[projects]]
+id = "legacy"
+name = "Legacy"
+source = "https://github.com/you/legacy"
+"#,
+        )
+        .unwrap();
+        let store = ProjectStore::load_from_home(dir.path());
+        assert_eq!(store.projects[0].local_repo, None);
+
+        let mut store = ProjectStore::load_from_home(dir.path());
+        store.projects[0].local_repo = Some("/tmp/my-decomp".into());
+        store.save().unwrap();
+        let store2 = ProjectStore::load_from_home(dir.path());
+        assert_eq!(
+            store2.projects[0].local_repo.as_deref(),
+            Some("/tmp/my-decomp")
+        );
     }
 }

@@ -32,6 +32,26 @@ cargo test
 cargo build --release
 ```
 
+CI (`.github/workflows/ci.yml`) runs the same gates on `main` and PRs.
+
+## Releases
+
+Version lives in `Cargo.toml` (`package.version`). To publish:
+
+1. Cut `[Unreleased]` notes into a new `## [X.Y.Z]` section in `CHANGELOG.md`.
+2. Ensure `Cargo.toml` version matches.
+3. Merge to `main`, then tag and push:
+
+   ```bash
+   git tag -a v0.1.0 -m "v0.1.0"
+   git push origin v0.1.0
+   ```
+
+4. GitHub Actions (`.github/workflows/release.yml`) builds and attaches binaries
+   for Linux x86_64, Windows x86_64, macOS Intel, and Apple Silicon.
+
+Do not add assistant/tool trailers to the tag or release notes.
+
 ## Local reference tree
 
 `reference/chaos-viewer/` may be cloned locally for context. It must remain gitignored

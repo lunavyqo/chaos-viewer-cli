@@ -23,7 +23,7 @@ use crate::claims::{load_claims, merge_locked_map, ClaimsSession};
 use crate::clipboard::copy_text;
 use crate::conventions::Convention;
 use crate::discover::sources_equivalent;
-use crate::grok_launch::{cwd_from_load_input, GrokLaunch, GrokLaunchMode};
+use crate::grok_launch::{launch_agent, resolve_repo_cwd, AgentKind, GrokLaunchMode, TerminalHost};
 use crate::load::{
     details_base_from_source, load_chaos_db, load_function_detail, DataSource, DetailCache,
 };
@@ -299,6 +299,9 @@ struct App {
     /// Saving a new profile: type id then Enter.
     saving_project: bool,
     project_id_input: String,
+    /// Editing selected profile's local decomp path (for Grok `--cwd`).
+    editing_local_repo: bool,
+    local_repo_input: String,
     /// Pending delete: project id awaiting y/n confirmation.
     pending_delete_id: Option<String>,
     /// Active data-tracking convention (from loaded project, else Default).
@@ -351,10 +354,11 @@ struct App {
     template_name_input: String,
     /// After leaving the TUI briefly, open this path in $EDITOR / nano.
     pending_edit: Option<std::path::PathBuf>,
-    /// After leaving the TUI briefly, run Grok Build with the batch prompt.
-    pending_grok: Option<GrokLaunch>,
     claims_session: Option<ClaimsSession>,
     show_help: bool,
+    /// Centered agent picker (Prompt · Shift+g).
+    agent_picker_open: bool,
+    agent_picker_sel: usize,
     should_quit: bool,
 }
 
@@ -387,10 +391,12 @@ impl App {
             setup_list_focus: true,
             saving_project: false,
             project_id_input: String::new(),
+            editing_local_repo: false,
+            local_repo_input: String::new(),
             pending_delete_id: None,
             convention: initial_convention,
             status:
-                "Project list · j/k enter · v convention · Tab/type URL · Shift+s save · d delete"
+                "Project list · j/k enter · v convention · r local path · Shift+s save · d delete"
                     .into(),
             error: None,
             db: None,
@@ -430,9 +436,10 @@ impl App {
             naming_template: false,
             template_name_input: String::new(),
             pending_edit: None,
-            pending_grok: None,
             claims_session,
             show_help: false,
+            agent_picker_open: false,
+            agent_picker_sel: 0,
             should_quit: false,
         };
         app.prompt_template_id = app.template_store.default_id().to_string();
@@ -441,6 +448,26 @@ impl App {
     }
 
     fn global_hints(&self) -> Vec<KeyHint> {
+        if self.agent_picker_open {
+            return vec![
+                KeyHint {
+                    key: "j/k",
+                    action: "select agent",
+                },
+                KeyHint {
+                    key: "enter",
+                    action: "launch",
+                },
+                KeyHint {
+                    key: "d",
+                    action: "set default",
+                },
+                KeyHint {
+                    key: "esc",
+                    action: "close",
+                },
+            ];
+        }
         if self.screen == Screen::Setup {
             if self.pending_delete_id.is_some() {
                 return vec![
@@ -470,6 +497,22 @@ impl App {
                     },
                 ];
             }
+            if self.editing_local_repo {
+                return vec![
+                    KeyHint {
+                        key: "type",
+                        action: "local path",
+                    },
+                    KeyHint {
+                        key: "enter",
+                        action: "save path",
+                    },
+                    KeyHint {
+                        key: "esc",
+                        action: "cancel",
+                    },
+                ];
+            }
             return vec![
                 KeyHint {
                     key: "type",
@@ -486,6 +529,10 @@ impl App {
                 KeyHint {
                     key: "v",
                     action: "convention",
+                },
+                KeyHint {
+                    key: "r",
+                    action: "local repo",
                 },
                 KeyHint {
                     key: "S-s",
@@ -646,7 +693,11 @@ impl App {
                 },
                 KeyHint {
                     key: "g",
-                    action: "grok build",
+                    action: "default agent",
+                },
+                KeyHint {
+                    key: "S-g",
+                    action: "agent picker",
                 },
                 KeyHint {
                     key: "S-b",
@@ -673,7 +724,7 @@ GLOBAL
   u           update progress (re-fetch chaos-db; matches can land mid-session)
   r           refresh claims only
   c           copy batch prompt to clipboard (no-op if batch empty)
-  g           launch Grok Build with the batch prompt (Prompt page; needs `grok`)
+  g           launch default agent (Prompt) · Shift+g agent picker
   b           add/remove selected function from batch (max 16)
   Shift+b     clear entire batch (unselect all)
               Prompt page uses the batch only (not the Overview cursor)
@@ -707,8 +758,8 @@ PROMPT
   e           edit current user template in $EDITOR / nano
   Shift+t     set current template as default
   c           copy batch prompt
-  g           open Grok Build with this prompt (run headless, or interactive)
-              writes ~/.config/chaos/last-grok-prompt.md · needs `grok` on PATH
+  g           launch default coding agent (Grok/Codex/Claude/Antigravity)
+  Shift+g     agent picker · enter launch · d set default · esc close
   Shift+b     clear entire batch
   experimental projects auto-select chaos-experimental when on chaos-viewer
 
@@ -718,6 +769,8 @@ SETUP / PROJECTS
   j / k       select saved project (when list focused)
   enter       load typed source, or selected project if list focused
   Shift+s     save current source as a named project (then type id)
+  r           set local decomp path for selected project (Grok cwd; list focused)
+              enter empty path to clear · ~/… expanded on save
   d           delete selected project (asks y/n first; list focused)
   p           open this hub from any loaded screen
   v           cycle data-tracking convention for selected project
@@ -832,6 +885,45 @@ Press ? or esc to close help."#
         Ok(())
     }
 
+    /// Start typing a local decomp path for the selected saved project.
+    fn begin_edit_local_repo(&mut self) {
+        let Some(p) = self.project_store.projects.get(self.project_sel) else {
+            self.status = "No project selected · save one with Shift+s first".into();
+            return;
+        };
+        self.editing_local_repo = true;
+        self.local_repo_input = p.local_repo.clone().unwrap_or_default();
+        self.status = format!(
+            "Local decomp path for '{}' · enter save · empty clears · esc cancel",
+            p.id
+        );
+    }
+
+    /// Persist `local_repo_input` onto the selected project (empty = clear).
+    fn commit_local_repo_edit(&mut self) -> Result<()> {
+        let Some(p) = self.project_store.projects.get(self.project_sel).cloned() else {
+            anyhow::bail!("no project selected");
+        };
+        let id = p.id.clone();
+        let raw = self.local_repo_input.trim();
+        let mut updated = p;
+        if raw.is_empty() {
+            updated.local_repo = None;
+            self.project_store.upsert(updated)?;
+            self.status = format!("Project '{id}' local_repo cleared");
+            return Ok(());
+        }
+        let expanded = expand_user_path_tui(raw);
+        if !expanded.is_dir() {
+            anyhow::bail!("not a directory: {raw} (expanded: {})", expanded.display());
+        }
+        let display = expanded.display().to_string();
+        updated.local_repo = Some(display.clone());
+        self.project_store.upsert(updated)?;
+        self.status = format!("Project '{id}' local_repo → {display}");
+        Ok(())
+    }
+
     /// Prefer stock experimental prompt when on experimental convention (and vice versa).
     /// Does not override a user-selected custom template.
     fn sync_template_to_convention(&mut self) {
@@ -876,6 +968,22 @@ Press ? or esc to close help."#
         let source = self.profile_source_to_save()?;
         let id = crate::projects::sanitize_project_id(id)?;
         let name = id.clone();
+        // Keep any previously configured local_repo when re-saving the same id.
+        let existing_local = self
+            .project_store
+            .get(&id)
+            .and_then(|p| p.local_repo.clone());
+        // If source is a local path and no local_repo yet, use it as the decomp root.
+        let local_repo = existing_local.or_else(|| {
+            let path = std::path::Path::new(source.trim());
+            if path.is_dir() {
+                Some(path.display().to_string())
+            } else if path.is_file() {
+                path.parent().map(|x| x.display().to_string())
+            } else {
+                None
+            }
+        });
         self.project_store.upsert(ProjectProfile {
             id: id.clone(),
             name,
@@ -883,6 +991,7 @@ Press ? or esc to close help."#
             branch: None,
             // New saves keep the session convention (default unless cycling first).
             convention: self.convention,
+            local_repo,
         })?;
         self.project_store.set_active(Some(&id))?;
         self.project_sel = self.project_store.index_of(&id).unwrap_or(0);
@@ -1617,10 +1726,54 @@ Add functions with b on Overview or Priorities \
         }
     }
 
-    /// Queue a Grok Build launch after this frame (suspend TUI like the editor).
-    fn queue_grok_launch(&mut self) {
+    fn default_agent(&self) -> AgentKind {
+        self.template_store
+            .config
+            .default_agent
+            .as_deref()
+            .and_then(AgentKind::parse)
+            .unwrap_or_default()
+    }
+
+    fn agent_bin_override(&self, agent: AgentKind) -> Option<&str> {
+        let cfg = &self.template_store.config;
+        match agent {
+            AgentKind::Grok => cfg.grok_bin.as_deref(),
+            AgentKind::Codex => cfg.codex_bin.as_deref(),
+            AgentKind::Claude => cfg.claude_bin.as_deref(),
+            AgentKind::Antigravity => cfg.antigravity_bin.as_deref(),
+        }
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    }
+
+    fn agent_extra_args(&self, agent: AgentKind) -> &[String] {
+        let cfg = &self.template_store.config;
+        match agent {
+            AgentKind::Grok => cfg.grok_extra_args.as_slice(),
+            AgentKind::Codex => cfg.codex_extra_args.as_slice(),
+            AgentKind::Claude => cfg.claude_extra_args.as_slice(),
+            AgentKind::Antigravity => cfg.antigravity_extra_args.as_slice(),
+        }
+    }
+
+    fn open_agent_picker(&mut self) {
         if self.batch.is_empty() {
-            self.status = "Nothing to send · batch empty (b to add, then g on Prompt)".into();
+            self.status =
+                "Nothing to send · batch empty (b to add, then g / Shift+g on Prompt)".into();
+            return;
+        }
+        let def = self.default_agent();
+        self.agent_picker_sel = def.index();
+        self.agent_picker_open = true;
+        self.status = "Agent picker · j/k select · enter launch · d set default · esc close".into();
+    }
+
+    /// Open the chosen coding agent in a **separate terminal** (chaos stays running).
+    fn queue_agent_launch(&mut self, agent: AgentKind) {
+        if self.batch.is_empty() {
+            self.status =
+                "Nothing to send · batch empty (b to add, then g / Shift+g on Prompt)".into();
             return;
         }
         if self.prompt_text.trim().is_empty() {
@@ -1628,38 +1781,98 @@ Add functions with b on Overview or Priorities \
             return;
         }
         let cfg = &self.template_store.config;
-        let mode = cfg
+        let grok_mode = cfg
             .grok_mode
             .as_deref()
             .and_then(GrokLaunchMode::parse)
             .unwrap_or_default();
-        let cwd = cwd_from_load_input(
+        let terminal = cfg
+            .grok_terminal
+            .as_deref()
+            .and_then(TerminalHost::parse)
+            .unwrap_or_default();
+        let profile_local = self
+            .project_store
+            .active_id
+            .as_ref()
+            .and_then(|id| self.project_store.get(id))
+            .and_then(|p| p.local_repo.as_deref());
+        let repo_cwd = resolve_repo_cwd(
+            profile_local,
+            cfg.grok_default_repo.as_deref(),
             self.load_input.as_deref(),
             self.source.as_ref().and_then(|s| match s {
                 DataSource::Path(p) => Some(p.as_path()),
                 DataSource::Url(_) => None,
             }),
         );
+        let bin_override = self.agent_bin_override(agent).map(str::to_string);
+        let extra = self.agent_extra_args(agent).to_vec();
         // Also copy so the user can paste if launch fails.
         let _ = copy_text(&self.prompt_text);
-        match GrokLaunch::prepare(
+        match launch_agent(
+            agent,
             &self.prompt_text,
-            mode,
-            cfg.grok_bin.as_deref(),
-            cwd,
-            &cfg.grok_extra_args,
+            bin_override.as_deref(),
+            repo_cwd.clone(),
+            &extra,
+            terminal,
+            grok_mode,
         ) {
-            Ok(launch) => {
+            Ok(report) => {
+                let repo = report
+                    .repo_cwd
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| {
+                        "no local_repo — set: chaos projects local-repo <id> <path>".into()
+                    });
                 self.status = format!(
-                    "Launching Grok Build ({}) · {} fn · esc after it exits",
-                    mode.as_str(),
-                    self.batch.len()
+                    "{} opened via {} · {} fn · cwd {} · look for a NEW Terminal window \
+(or: open ~/.config/chaos/last-agent-run.command)",
+                    agent.label(),
+                    report.terminal,
+                    self.batch.len(),
+                    repo,
                 );
-                self.pending_grok = Some(launch);
+                if report.repo_cwd.is_none() {
+                    self.error = Some(
+                        "No local decomp path. Set per project: \
+chaos projects local-repo <id> /path/to/decomp \
+(or grok_default_repo in config.toml)."
+                            .into(),
+                    );
+                } else {
+                    self.error = None;
+                }
+                self.agent_picker_open = false;
             }
             Err(e) => {
                 self.error = Some(format!("{e:#}"));
-                self.status = "Grok launch failed (prompt still copied if clipboard ok)".into();
+                self.status = format!(
+                    "{} launch failed (prompt still copied if clipboard ok)",
+                    agent.label()
+                );
+            }
+        }
+    }
+
+    fn set_default_agent_from_picker(&mut self) {
+        let agent = AgentKind::ALL
+            .get(self.agent_picker_sel)
+            .copied()
+            .unwrap_or_default();
+        match self.template_store.set_default_agent(agent.id()) {
+            Ok(()) => {
+                self.status = format!(
+                    "Default agent → {} (`g` launches this) · enter to open now · esc close",
+                    agent.label()
+                );
+                self.error = None;
+            }
+            Err(e) => {
+                self.error = Some(format!("{e:#}"));
+                self.status = "Could not save default agent".into();
             }
         }
     }
@@ -1686,6 +1899,43 @@ Add functions with b on Overview or Priorities \
                     } else {
                         "Help closed".into()
                     };
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Agent picker modal (Prompt · Shift+g)
+        if self.agent_picker_open {
+            match key {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.agent_picker_open = false;
+                    self.status = "Agent picker closed".into();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.agent_picker_sel == 0 {
+                        self.agent_picker_sel = AgentKind::ALL.len() - 1;
+                    } else {
+                        self.agent_picker_sel -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.agent_picker_sel = (self.agent_picker_sel + 1) % AgentKind::ALL.len();
+                }
+                KeyCode::Char('1') => self.agent_picker_sel = 0,
+                KeyCode::Char('2') => self.agent_picker_sel = 1,
+                KeyCode::Char('3') => self.agent_picker_sel = 2,
+                KeyCode::Char('4') => self.agent_picker_sel = 3,
+                KeyCode::Char('d') | KeyCode::Char('*') => {
+                    self.set_default_agent_from_picker();
+                }
+                KeyCode::Enter => {
+                    let agent = AgentKind::ALL
+                        .get(self.agent_picker_sel)
+                        .copied()
+                        .unwrap_or_default();
+                    self.rebuild_prompt().await;
+                    self.queue_agent_launch(agent);
                 }
                 _ => {}
             }
@@ -1836,6 +2086,39 @@ Add functions with b on Overview or Priorities \
                 }
                 return;
             }
+            if self.editing_local_repo {
+                match key {
+                    KeyCode::Esc => {
+                        self.editing_local_repo = false;
+                        self.local_repo_input.clear();
+                        self.status = "Local path edit cancelled".into();
+                    }
+                    KeyCode::Enter => match self.commit_local_repo_edit() {
+                        Ok(()) => {
+                            self.editing_local_repo = false;
+                            self.local_repo_input.clear();
+                            self.error = None;
+                        }
+                        Err(e) => {
+                            self.error = Some(format!("{e:#}"));
+                            self.status = "Local path not saved".into();
+                        }
+                    },
+                    KeyCode::Backspace | KeyCode::Delete => {
+                        self.local_repo_input.pop();
+                    }
+                    KeyCode::Char(_) if !mods.contains(KeyModifiers::CONTROL) => {
+                        if let Some(c) = typed {
+                            // Paths: allow spaces, ~, /, ., etc.
+                            if !c.is_control() {
+                                self.local_repo_input.push(c);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
             match key {
                 KeyCode::Esc => {
                     if self.db.is_some() {
@@ -1843,14 +2126,14 @@ Add functions with b on Overview or Priorities \
                         self.status = "Overview".into();
                     } else {
                         self.status =
-                            "type URL · enter load · Tab list · v convention · Shift+s save · q quit"
+                            "type URL · enter load · Tab · v convention · r path · Shift+s · q"
                                 .into();
                     }
                 }
                 KeyCode::Tab => {
                     self.setup_list_focus = !self.setup_list_focus;
                     self.status = if self.setup_list_focus {
-                        "Focus: project list (j/k enter · v convention · d delete · Shift+s save)"
+                        "Focus: project list (j/k enter · v convention · r path · d delete)"
                     } else {
                         "Focus: source input (type URL · enter load · Shift+s save)"
                     }
@@ -1875,6 +2158,9 @@ Add functions with b on Overview or Priorities \
                     if let Err(e) = self.cycle_selected_convention() {
                         self.error = Some(format!("{e:#}"));
                     }
+                }
+                KeyCode::Char('r') if self.setup_list_focus => {
+                    self.begin_edit_local_repo();
                 }
                 KeyCode::Char('d') if self.setup_list_focus => {
                     if let Some(p) = self.project_store.projects.get(self.project_sel) {
@@ -1935,7 +2221,10 @@ Add functions with b on Overview or Priorities \
                         {
                             self.should_quit = true;
                         } else if self.setup_list_focus
-                            && matches!(c, 'j' | 'k' | 'd' | 'v' | 'J' | 'K' | 'D' | 'V')
+                            && matches!(
+                                c,
+                                'j' | 'k' | 'd' | 'v' | 'r' | 'J' | 'K' | 'D' | 'V' | 'R'
+                            )
                         {
                             // list shortcuts handled above
                         } else {
@@ -1963,7 +2252,7 @@ Add functions with b on Overview or Priorities \
                     }
                 }
                 self.status =
-                    "Project list · j/k enter · v convention · Tab/type URL · Shift+s save · d delete"
+                    "Project list · j/k enter · v convention · r local path · Shift+s save · d"
                         .into();
             }
             KeyCode::Esc => {
@@ -2015,10 +2304,15 @@ Add functions with b on Overview or Priorities \
                 self.rebuild_prompt().await;
                 self.copy_prompt();
             }
-            // g = hand batch prompt to Grok Build (Prompt page; needs batch).
+            // g = default agent; Shift+g = agent picker (Prompt page; needs batch).
             KeyCode::Char('g') if self.screen == Screen::Prompt => {
-                self.rebuild_prompt().await;
-                self.queue_grok_launch();
+                if mods.contains(KeyModifiers::SHIFT) {
+                    self.open_agent_picker();
+                } else {
+                    self.rebuild_prompt().await;
+                    let agent = self.default_agent();
+                    self.queue_agent_launch(agent);
+                }
             }
             // Shift+b = clear entire batch (plain b toggles selected).
             KeyCode::Char('b') if mods.contains(KeyModifiers::SHIFT) => {
@@ -2448,9 +2742,75 @@ Add functions with b on Overview or Priorities \
         }
         self.draw_footer(f, chunks[2]);
 
+        if self.agent_picker_open {
+            self.draw_agent_picker_overlay(f, area);
+        }
         if self.show_help {
             self.draw_help_overlay(f, area);
         }
+    }
+
+    fn draw_agent_picker_overlay(&self, f: &mut Frame, area: Rect) {
+        let w = area.width.saturating_sub(10).min(56);
+        let h = area.height.saturating_sub(6).min(14);
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        let rect = Rect::new(x, y, w, h);
+        let bg = self.theme.panel;
+        let def = self.default_agent();
+
+        // Dim the background slightly by clearing the modal region only.
+        f.render_widget(Clear, rect);
+
+        let title = format!(
+            " coding agent  ·  default: {}  ·  d set · enter launch ",
+            def.label()
+        );
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(paint_on(self.theme.accent, bg))
+            .style(paint_on(self.theme.text, bg));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        fill_pane(f, inner, &self.theme, bg);
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            "  j/k move · 1–4 jump · enter open · d default · esc",
+            paint_on(self.theme.muted, bg),
+        )));
+        lines.push(Line::from(""));
+        for (i, agent) in AgentKind::ALL.iter().enumerate() {
+            let selected = i == self.agent_picker_sel;
+            let is_def = *agent == def;
+            let mark = if selected { "›" } else { " " };
+            let star = if is_def { "★" } else { " " };
+            let row = format!(
+                " {mark} {star} {}. {:<14}  ({})",
+                i + 1,
+                agent.label(),
+                agent.short_bin()
+            );
+            let style = if selected {
+                paint_bold_on(self.theme.accent, bg)
+            } else {
+                paint_on(self.theme.text, bg)
+            };
+            lines.push(Line::from(Span::styled(row, style)));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  needs local_repo · batch not empty",
+            paint_on(self.theme.muted, bg),
+        )));
+
+        f.render_widget(
+            Paragraph::new(lines)
+                .style(paint_on(self.theme.text, bg))
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
     }
 
     /// All loaded pages on one line; current page marked as a reversed chip `[name]`.
@@ -2647,6 +3007,14 @@ Add functions with b on Overview or Priorities \
             format!(" Delete '{id}'?  y confirm · n/esc cancel ")
         } else if self.saving_project {
             format!(" Save project as: {}_ ", self.project_id_input)
+        } else if self.editing_local_repo {
+            let id = self
+                .project_store
+                .projects
+                .get(self.project_sel)
+                .map(|p| p.id.as_str())
+                .unwrap_or("?");
+            format!(" Local decomp path for '{id}': {}_ ", self.local_repo_input)
         } else {
             format!(
                 " Projects  ·  active: {}  ·  p anytime ",
@@ -2668,11 +3036,12 @@ Add functions with b on Overview or Priorities \
             .split(inner);
 
         // Project list
-        let list_title = if self.setup_list_focus && !self.saving_project {
-            " Saved projects  [focused]  j/k enter v=convention d "
-        } else {
-            " Saved projects "
-        };
+        let list_title =
+            if self.setup_list_focus && !self.saving_project && !self.editing_local_repo {
+                " Saved projects  [focused]  j/k enter v=convention r=path d "
+            } else {
+                " Saved projects "
+            };
         let list_block = content_block(list_title, &self.theme, self.theme.border);
         let list_inner = list_block.inner(rows[0]);
         f.render_widget(list_block, rows[0]);
@@ -2696,9 +3065,14 @@ Add functions with b on Overview or Priorities \
                 } else {
                     paint_on(self.theme.text, row_bg)
                 };
+                let local = p
+                    .local_repo
+                    .as_deref()
+                    .map(|r| format!("  · local:{r}"))
+                    .unwrap_or_else(|| "  · local:(unset)".into());
                 list_lines.push(Line::from(Span::styled(
                     format!(
-                        "{mark}{star}{:<14}  [{:<12}]  {}",
+                        "{mark}{star}{:<14}  [{:<12}]  {}{local}",
                         p.id,
                         p.convention.label(),
                         p.source
@@ -2721,17 +3095,25 @@ Add functions with b on Overview or Priorities \
             );
         }
 
-        // Source input
-        let input_title = if !self.setup_list_focus && !self.saving_project {
-            " Source  [focused]  path · URL · GitHub "
+        // Source input — or local path editor when r-mode is active.
+        let (input_title, input_value) = if self.editing_local_repo {
+            (
+                " Local decomp path  [editing]  enter save · empty clears · esc cancel ",
+                self.local_repo_input.as_str(),
+            )
+        } else if !self.setup_list_focus && !self.saving_project {
+            (
+                " Source  [focused]  path · URL · GitHub ",
+                self.setup_input.as_str(),
+            )
         } else {
-            " Source  path · URL · GitHub "
+            (" Source  path · URL · GitHub ", self.setup_input.as_str())
         };
         let input_block = content_block(input_title, &self.theme, self.theme.border);
         let input_inner = input_block.inner(rows[1]);
         f.render_widget(input_block, rows[1]);
         fill_pane(f, input_inner, &self.theme, bg);
-        let input_line = format!("> {}_", self.setup_input);
+        let input_line = format!("> {input_value}_");
         f.render_widget(
             Paragraph::new(input_line)
                 .style(paint_on(self.theme.text, bg))
@@ -2744,8 +3126,10 @@ Add functions with b on Overview or Priorities \
             "y = permanently remove this saved profile · n or esc = keep it"
         } else if self.saving_project {
             "Enter id · enter save · esc cancel"
+        } else if self.editing_local_repo {
+            "Type absolute or ~/ path · enter save (must exist) · empty + enter clears · esc cancel"
         } else {
-            "j/k list · enter load · v convention (default|experimental) · Tab/type URL · Shift+s save · d delete · q quit"
+            "j/k list · enter load · v convention · r local path (Grok) · Tab/type URL · Shift+s save · d delete · q quit"
         };
         f.render_widget(
             Paragraph::new(help)
@@ -3216,6 +3600,22 @@ pub async fn run(
     result
 }
 
+/// Expand `~/…` using `$HOME` / `%USERPROFILE%` (TUI local_repo editor).
+fn expand_user_path_tui(raw: &str) -> std::path::PathBuf {
+    let s = raw.trim();
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    }
+    if s == "~" {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            return std::path::PathBuf::from(home);
+        }
+    }
+    std::path::PathBuf::from(s)
+}
+
 async fn run_loop(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -3302,38 +3702,6 @@ async fn run_loop(
                 Err(e) => {
                     app.error = Some(format!("editor: {e:#}"));
                     app.status = format!("File left at {}", path.display());
-                }
-            }
-        }
-
-        // Suspend TUI, run Grok Build with the batch prompt, resume.
-        if let Some(launch) = app.pending_grok.take() {
-            disable_raw_mode()?;
-            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-            terminal.show_cursor()?;
-            eprintln!(
-                "chaos → Grok Build ({}) · prompt {}\n",
-                launch.mode.as_str(),
-                launch.prompt_path.display()
-            );
-            let result = launch.run_foreground();
-            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-            enable_raw_mode()?;
-            terminal.hide_cursor()?;
-            terminal.clear()?;
-            match result {
-                Ok(()) => {
-                    app.status = format!(
-                        "Grok finished · prompt kept at {}",
-                        launch.prompt_path.display()
-                    );
-                }
-                Err(e) => {
-                    app.error = Some(format!("grok: {e:#}"));
-                    app.status = format!(
-                        "Grok failed · prompt at {} (also on clipboard)",
-                        launch.prompt_path.display()
-                    );
                 }
             }
         }
