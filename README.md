@@ -17,7 +17,8 @@ Private early development. Binary name: `chaos`.
 - Load atlas data from a local path, raw JSON URL, or GitHub repo (probes the same
   locations as the web viewer); **multiple saved projects** with switch / resume
 - Overview: modules + functions on top, **detail pane** underneath; **`m`**
-  filters all / unmatched only / matched only
+  filters all / unmatched only / matched only; **`s`** sorts modules (name,
+  best/worst by matched count, most functions, most bytes)
 - **Heatmap** tab: view-only squarified byte treemap (same layout math as
   chaos-viewer) — green matched / grey unmatched / yellow claimed
 - Priority lists: nearly done, best scaffolded, biggest unmatched
