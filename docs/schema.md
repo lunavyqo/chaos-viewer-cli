@@ -61,8 +61,8 @@ how it was matched:
 
 | kind | fields |
 |---|---|
-| `"human"` | optional `by`, `note` |
-| `"ai"` | required `model`, `reasoning`, `harness`; optional `by` |
+| `"human"` | `by` recommended (GitHub login); optional `note` |
+| `"ai"` | required `model`, `reasoning`, `harness`; **`by` = operator GitHub login** (same idea as claims handle) |
 
 **Token form (recommended for generators / bank tools):** use slug-style ids
 with **no spaces**. Display names like `Grok 4.5` / `Grok Build` often fail

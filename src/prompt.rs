@@ -68,19 +68,57 @@ pub fn build_experimental_prompt(
     } else {
         functions.len()
     };
+    let handle = operator_github_handle(opts);
     let mut parts: Vec<String> = Vec::new();
-    parts.push(prompt_header_experimental(project, n));
+    parts.push(prompt_header_experimental(project, n, &handle));
     for (fn_, det) in functions {
         parts.push(prompt_section(project, fn_, det.as_ref()));
-        parts.push(prompt_provenance_block(fn_));
+        parts.push(prompt_provenance_block(fn_, &handle));
     }
-    parts.push(prompt_footer_experimental(project, n, opts));
+    parts.push(prompt_footer_experimental(project, n, opts, &handle));
     parts.join("\n\n")
 }
 
-fn prompt_header_experimental(project: &ProjectConfig, n: usize) -> String {
+/// Operator GitHub login for provenance `by` (same idea as claims `handle`).
+///
+/// Order: claims session handle → `CHAOS_CLAIMS_HANDLE` → `CHAOS_GITHUB_HANDLE`
+/// → placeholder the model must replace.
+fn operator_github_handle(opts: &PromptOptions) -> String {
+    if let Some(s) = &opts.claims_session {
+        let h = s.handle.trim();
+        if !h.is_empty() && h != "chaos-viewer-user" {
+            return h.to_string();
+        }
+        if !h.is_empty() {
+            return h.to_string();
+        }
+    }
+    for key in ["CHAOS_CLAIMS_HANDLE", "CHAOS_GITHUB_HANDLE", "GITHUB_USER"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    "YOUR_GITHUB_LOGIN".into()
+}
+
+fn prompt_header_experimental(project: &ProjectConfig, n: usize, handle: &str) -> String {
     let mut base = prompt_header(project, n);
-    base.push_str(
+    let by_line = if handle == "YOUR_GITHUB_LOGIN" {
+        "  by         = REQUIRED — the operator's GitHub username (login), \
+not the model name.\n               Replace YOUR_GITHUB_LOGIN with the real login \
+(same handle used for claims / PRs)."
+            .to_string()
+    } else {
+        format!(
+            "  by         = REQUIRED — already set to the operator GitHub login \
+\"{handle}\".\n               Copy it into every MATCH_RESULT. Do not invent another \
+name; do not put the model id here."
+        )
+    };
+    base.push_str(&format!(
         r#"
 
 ======================================================================
@@ -94,6 +132,7 @@ When you are an AI agent matching code:
   model      = machine token for the model (NO SPACES; slug form)
   reasoning  = effort/reasoning level token (high|medium|low|none|…)
   harness    = tool/pipeline token (NO SPACES; lowercase preferred)
+{by_line}
 
 TOKEN RULES (validators often reject display names):
   - model:   letters, digits, . _ + / - only; start alphanumeric; max ~128
@@ -107,18 +146,27 @@ TOKEN RULES (validators often reject display names):
 
 When a human matched without AI:
   kind = human
-  by   = their handle if known (slug or github login)
+  by   = REQUIRED — that person's GitHub login (same rule as above)
+
+IMPORTANT: `by` is always the **human operator / contributor GitHub username**,
+never the model name. Claims use the same handle field; keep them consistent.
 
 Do NOT invent a match. VERIFY with the command below until it reports MATCH.
 Do NOT skip the MATCH_RESULT block(s) at the end of your reply.
 Do NOT put secrets, API keys, or full chain-of-thought dumps into provenance —
-only model, reasoning, and harness tokens (or human).
+only model, reasoning, harness tokens, and the operator `by` handle.
 "#,
-    );
+        by_line = by_line,
+    ));
     base
 }
 
-fn prompt_provenance_block(fn_: &ChaosFunction) -> String {
+fn prompt_provenance_block(fn_: &ChaosFunction, handle: &str) -> String {
+    let by_comment = if handle == "YOUR_GITHUB_LOGIN" {
+        "# REQUIRED: operator GitHub login (not the model). Replace this placeholder."
+    } else {
+        "# REQUIRED: operator GitHub login — keep this value (from claims / env)."
+    };
     format!(
         r#"----------------------------------------------------------------------
 MATCH_RESULT template for {name} (fill this in your FINAL reply; copy one
@@ -138,7 +186,7 @@ MATCH_RESULT:
     model: "grok-4.5"           # NOT "Grok 4.5"
     reasoning: "high"
     harness: "grok-build"       # NOT "Grok Build"
-    # by: "optional-handle"
+    by: "{handle}"              {by_comment}
   # If near_miss: include draft C and estimated instruction divergence:
   # nearMiss:
   #   divergences: <int>
@@ -150,13 +198,30 @@ MATCH_RESULT:
         module = fn_.module,
         addr = fn_.addr,
         size = fn_.size,
+        handle = handle,
+        by_comment = by_comment,
     )
 }
 
-fn prompt_footer_experimental(project: &ProjectConfig, n: usize, opts: &PromptOptions) -> String {
+fn prompt_footer_experimental(
+    project: &ProjectConfig,
+    n: usize,
+    opts: &PromptOptions,
+    handle: &str,
+) -> String {
     // Start from default footer, then append experimental banking rules.
     let mut lines = prompt_footer(project, n, opts);
-    lines.push_str(
+    let by_rule = if handle == "YOUR_GITHUB_LOGIN" {
+        "   - by  → REQUIRED on every matched result: the operator's **GitHub username**\n\
+             (login). Replace YOUR_GITHUB_LOGIN. Same handle as claims. Not the model id."
+            .to_string()
+    } else {
+        format!(
+            "   - by  → REQUIRED: use \"{handle}\" (operator GitHub login) on every matched\n\
+             MATCH_RESULT. Same handle as claims. Do not substitute the model name."
+        )
+    };
+    lines.push_str(&format!(
         r#"
 
 ======================================================================
@@ -166,17 +231,19 @@ EXPERIMENTAL — BEFORE YOU FINISH
 2. If status=matched (verify says MATCH):
    - kind=ai  → model + reasoning + harness MUST be non-empty SLUG tokens
      (no spaces; see TOKEN RULES). Not placeholders; not display names.
-   - kind=human → only when no model was used; set by if known.
+   - kind=human → only when no model was used.
+{by_rule}
 3. If status=near_miss: still emit MATCH_RESULT with nearMiss draft so the
    operator can ingest it; provenance on near-miss is optional but helpful.
 4. Atlas / ledger operators will store matchProvenance on the matched function
    in chaos-db.json. Your MATCH_RESULT is the source of truth for that record.
 5. Opening a PR is still required when matched (see above); mention model +
-   harness briefly in the PR body.
+   harness briefly in the PR body; PR author should be the same GitHub user as `by`.
 
 Refuse to claim "matched" without the verify command succeeding.
 "#,
-    );
+        by_rule = by_rule,
+    ));
     lines
 }
 
@@ -432,9 +499,29 @@ mod tests {
         assert!(text.contains("reasoning:"));
         assert!(text.contains("harness:"));
         assert!(text.contains("BEFORE YOU FINISH"));
+        // by is required and is the operator GitHub login (placeholder when unset)
+        assert!(text.contains("by:"));
+        assert!(text.contains("YOUR_GITHUB_LOGIN") || text.contains("GitHub"));
+        assert!(text.contains("operator"));
         // Still includes core match task bits
         assert!(text.contains("byte-for-byte"));
         assert!(text.contains("VERIFY"));
+    }
+
+    #[test]
+    fn experimental_prompt_prefill_by_from_claims_handle() {
+        let project = sample_project();
+        let fn_ = sample_fn();
+        let opts = PromptOptions {
+            claims_session: Some(ClaimsSession {
+                token: "t".into(),
+                handle: "lunavyqo".into(),
+            }),
+        };
+        let text = build_experimental_prompt(&project, &[(fn_, None)], &opts);
+        assert!(text.contains("by: \"lunavyqo\""));
+        assert!(text.contains("operator GitHub login"));
+        assert!(!text.contains("YOUR_GITHUB_LOGIN"));
     }
 
     #[test]

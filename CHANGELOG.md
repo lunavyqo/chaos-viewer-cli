@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Experimental prompt: require operator GitHub login in provenance **`by`**
+  (prefilled from claims handle / `CHAOS_CLAIMS_HANDLE` / `CHAOS_GITHUB_HANDLE`
+  when set — same idea as the claims footer). Models were omitting it.
 - Experimental prompt / schema docs: require **slug tokens** for model and
   harness (e.g. `grok-4.5`, `grok-build`) — display names with spaces break
   common bank/provenance validators.
