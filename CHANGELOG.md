@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Clear batch** (`Shift+b`): empty the prompt batch in one keypress (same idea
+  as chaos-viewer’s clear control). Shown in help, chrome hints, and the detail
+  footer when the batch is non-empty.
 - Overview **module sort** (`s`): cycle name → worst (most unmatched left) →
   best (fewest unmatched left) → most functions → most bytes. Best/worst use
   remaining open function **counts**, not match percentages.
