@@ -36,8 +36,10 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
+          # Both Apple targets on arm64 macOS (cross-compile Intel; macos-13
+          # runners are scarce / often stuck queued).
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
             archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-14
