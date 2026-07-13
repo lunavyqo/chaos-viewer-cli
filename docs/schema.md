@@ -64,11 +64,21 @@ how it was matched:
 | `"human"` | optional `by`, `note` |
 | `"ai"` | required `model`, `reasoning`, `harness`; optional `by` |
 
+**Token form (recommended for generators / bank tools):** use slug-style ids
+with **no spaces**. Display names like `Grok 4.5` / `Grok Build` often fail
+strict validators — prefer `grok-4.5` and `grok-build`.
+
+| Field | Suggested pattern | Good | Bad |
+|---|---|---|---|
+| `model` | alnum + `._+/-` | `grok-4.5`, `claude-opus-4` | `Grok 4.5` |
+| `reasoning` | short token | `high`, `medium`, `none` | free prose |
+| `harness` | lowercase slug | `grok-build`, `fanout-v3` | `Grok Build` |
+
 Examples:
 
 ```json
 { "kind": "human", "by": "lunavyqo" }
-{ "kind": "ai", "model": "claude-opus-4", "reasoning": "high", "harness": "fanout-v3", "by": "op" }
+{ "kind": "ai", "model": "grok-4.5", "reasoning": "high", "harness": "grok-build", "by": "op" }
 ```
 
 The CLI shows this on the Overview detail pane when the active profile is
