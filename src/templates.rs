@@ -42,15 +42,42 @@ pub struct UserConfig {
     /// Last / preferred project profile id (`projects.toml`).
     #[serde(default)]
     pub active_project: Option<String>,
+    /// Default coding agent for **`g`**: `grok` | `codex` | `claude` | `antigravity`.
+    #[serde(default)]
+    pub default_agent: Option<String>,
     /// Path or name of the Grok Build binary (`grok`). Empty = PATH / `~/.grok/bin/grok`.
     #[serde(default)]
     pub grok_bin: Option<String>,
-    /// `run` (headless, default) or `interactive` (TUI with bootstrap prompt).
+    /// Path or name of the Codex CLI binary.
+    #[serde(default)]
+    pub codex_bin: Option<String>,
+    /// Path or name of the Claude Code binary.
+    #[serde(default)]
+    pub claude_bin: Option<String>,
+    /// Path or name of the Antigravity CLI (`agy`).
+    #[serde(default)]
+    pub antigravity_bin: Option<String>,
+    /// `interactive` (Grok TUI, default) or `run` (headless `--prompt-file`). Grok only.
     #[serde(default)]
     pub grok_mode: Option<String>,
-    /// Extra CLI args for `grok` (e.g. `["--always-approve"]`).
+    /// Extra CLI args for Grok (e.g. `["--always-approve"]`).
     #[serde(default)]
     pub grok_extra_args: Vec<String>,
+    /// Extra CLI args for Codex.
+    #[serde(default)]
+    pub codex_extra_args: Vec<String>,
+    /// Extra CLI args for Claude Code.
+    #[serde(default)]
+    pub claude_extra_args: Vec<String>,
+    /// Extra CLI args for Antigravity.
+    #[serde(default)]
+    pub antigravity_extra_args: Vec<String>,
+    /// Fallback local decomp path when the active project has no `local_repo`.
+    #[serde(default)]
+    pub grok_default_repo: Option<String>,
+    /// External terminal host: `auto` | `terminal` | `iterm` | `linux` | `windows`.
+    #[serde(default)]
+    pub grok_terminal: Option<String>,
 }
 
 fn default_template_id() -> String {
@@ -194,6 +221,13 @@ impl TemplateStore {
             bail!("unknown template id '{id}'");
         }
         self.config.default_template = id.to_string();
+        save_user_config(&self.config_path, &self.config)?;
+        Ok(())
+    }
+
+    /// Persist the default coding agent for Prompt **`g`**.
+    pub fn set_default_agent(&mut self, agent_id: &str) -> Result<()> {
+        self.config.default_agent = Some(agent_id.to_string());
         save_user_config(&self.config_path, &self.config)?;
         Ok(())
     }

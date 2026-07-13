@@ -118,6 +118,9 @@ enum ProjectsCmd {
         /// Data-tracking convention: default | experimental
         #[arg(long, default_value = "default")]
         convention: String,
+        /// Local decomp checkout on this machine (for Grok `--cwd`)
+        #[arg(long)]
+        local_repo: Option<String>,
         /// Mark as active (resume on next `chaos` launch)
         #[arg(long)]
         use_now: bool,
@@ -132,6 +135,13 @@ enum ProjectsCmd {
         id: String,
         /// Convention name: default or experimental
         convention: String,
+    },
+    /// Set (or clear) the local decomp path used by Grok launch (`g` in TUI)
+    LocalRepo {
+        /// Profile id
+        id: String,
+        /// Absolute or `~/…` path to the decomp checkout. Omit or pass `-` to clear.
+        path: Option<String>,
     },
 }
 
@@ -429,6 +439,7 @@ async fn main() -> Result<()> {
                     if store.projects.is_empty() {
                         println!("(no saved projects)");
                         println!("Add with: chaos projects add <id> --source <path|url|github>");
+                        println!("Set decomp path: chaos projects local-repo <id> /path/to/decomp");
                     } else {
                         for p in &store.projects {
                             let mark = if store.active_id.as_deref() == Some(p.id.as_str()) {
@@ -450,6 +461,10 @@ async fn main() -> Result<()> {
                             if p.name != p.id {
                                 println!("    name: {}", p.name);
                             }
+                            match &p.local_repo {
+                                Some(r) => println!("    local_repo: {r}"),
+                                None => println!("    local_repo: (unset)"),
+                            }
                         }
                     }
                 }
@@ -462,18 +477,23 @@ async fn main() -> Result<()> {
                     name,
                     branch,
                     convention,
+                    local_repo,
                     use_now,
                 } => {
                     let name = name.unwrap_or_else(|| id.clone());
                     let convention = Convention::parse(&convention).with_context(|| {
                         format!("unknown convention '{convention}' (use default or experimental)")
                     })?;
+                    // Preserve previous local_repo when re-adding without --local-repo.
+                    let local_repo =
+                        local_repo.or_else(|| store.get(&id).and_then(|p| p.local_repo.clone()));
                     store.upsert(ProjectProfile {
                         id: id.clone(),
                         name,
                         source,
                         branch,
                         convention,
+                        local_repo: local_repo.clone(),
                     })?;
                     if use_now {
                         store.set_active(Some(&id))?;
@@ -484,6 +504,9 @@ async fn main() -> Result<()> {
                         convention.label(),
                         store.path.display()
                     );
+                    if let Some(r) = local_repo {
+                        println!("local_repo = {r}");
+                    }
                 }
                 ProjectsCmd::Remove { id } => {
                     if store.remove(&id)? {
@@ -508,6 +531,35 @@ async fn main() -> Result<()> {
                     store.upsert(profile)?;
                     println!("{id} convention → {}", convention.label());
                 }
+                ProjectsCmd::LocalRepo { id, path } => {
+                    let mut profile = store
+                        .get(&id)
+                        .cloned()
+                        .with_context(|| format!("unknown project '{id}'"))?;
+                    let clear = path
+                        .as_deref()
+                        .map(|s| s.trim().is_empty() || s.trim() == "-")
+                        .unwrap_or(true);
+                    if clear {
+                        profile.local_repo = None;
+                        store.upsert(profile)?;
+                        println!("{id} local_repo cleared");
+                    } else {
+                        let raw = path.unwrap();
+                        let expanded = expand_user_path(&raw);
+                        if !expanded.is_dir() {
+                            bail!(
+                                "not a directory: {} (expanded: {})",
+                                raw,
+                                expanded.display()
+                            );
+                        }
+                        let display = expanded.display().to_string();
+                        profile.local_repo = Some(display.clone());
+                        store.upsert(profile)?;
+                        println!("{id} local_repo → {display}");
+                    }
+                }
             }
         }
         Commands::Claims { cmd } => {
@@ -516,6 +568,22 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Expand `~/…` using `$HOME` / `%USERPROFILE%`.
+fn expand_user_path(raw: &str) -> std::path::PathBuf {
+    let s = raw.trim();
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    }
+    if s == "~" {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            return std::path::PathBuf::from(home);
+        }
+    }
+    std::path::PathBuf::from(s)
 }
 
 /// Resolve --project profile into input/repo/branch, else use CLI flags.

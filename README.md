@@ -10,9 +10,27 @@ Schema-compatible with that project's `ADAPTING.md` data format.
 
 ## Status
 
-Early development. Binary name: `chaos`.
+**v0.1.0** — Binary name: `chaos`. Schema-compatible with Chaos Viewer atlases.
 
-## Features (MVP)
+## Install
+
+### Prebuilt binaries (recommended)
+
+Download the archive for your platform from
+[GitHub Releases](https://github.com/lunavyqo/chaos-viewer-cli/releases):
+
+| Platform | Target triple |
+|---|---|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` |
+| Windows x86_64 | `x86_64-pc-windows-msvc` |
+| macOS Intel | `x86_64-apple-darwin` |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+
+Unpack and put `chaos` (or `chaos.exe`) on your `PATH`.
+
+### From source
+
+## Features
 
 - Load atlas data from a local path, raw JSON URL, or GitHub repo (probes the same
   locations as the web viewer); **multiple saved projects** with switch / resume
@@ -23,19 +41,18 @@ Early development. Binary name: `chaos`.
 - **Heatmap** tab: view-only squarified byte treemap (same layout math as
   chaos-viewer) — green matched / grey unmatched / yellow claimed
 - Priority lists: nearly done, best scaffolded, biggest unmatched
-- Prompt builder (batch, max 16) with clipboard copy, **`g`** to open **Grok
-  Build** with the prompt, and **`Shift+b`** clear batch; **multiple templates**
-  (built-in `chaos-viewer` + experimental provenance prompt + user TOML under
-  `~/.config/chaos/templates`)
+- Prompt builder (batch, max 16) with clipboard copy, **`g`** / **`Shift+g`** to
+  launch **Grok / Codex / Claude / Antigravity** in a separate terminal (set
+  `local_repo` per project; default agent configurable), and **`Shift+b`** clear
+  batch; **multiple templates** (built-in `chaos-viewer` + experimental
+  provenance prompt + user TOML under `~/.config/chaos/templates`)
 - Optional **pluggable claims** coordination: any HTTP coordinator via
   `project.claimsApi` (not hardcoded to one host) + `CLAIMS.md` merge
 
 ## Requirements
 
-- Rust 1.85+ (edition 2024 workspace uses a recent stable toolchain)
+- Rust 1.75+ (edition 2021; CI uses current stable)
 - Network access for remote data / claims (optional for pure local files)
-
-## Build
 
 ```bash
 cargo build --release
@@ -53,6 +70,8 @@ chaos --repo https://github.com/you/your-decomp
 
 # Multi-repo profiles (saved under ~/.config/chaos/projects.toml)
 chaos projects add sm64ds --source https://github.com/you/sm64ds-decomp --use-now
+# Local decomp checkout for Grok launch (g in TUI) — independent of atlas URL
+chaos projects local-repo sm64ds ~/path/to/sm64ds-decomp
 chaos projects list
 chaos --project sm64ds
 # TUI: p opens the projects hub; active project resumes on next launch

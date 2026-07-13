@@ -41,29 +41,57 @@ On the **Prompt** page (`4`):
 | `e` | **Edit** current user template in `$EDITOR` / nano (not the built-in) |
 | `Shift+t` | Save current as default |
 | `c` | Copy rendered prompt |
-| `g` | **Grok Build**: save prompt file, copy clipboard, leave TUI and run `grok` |
+| `g` | Launch the **default** coding agent in a new terminal (chaos stays open) |
+| `Shift+g` | **Agent picker**: Grok / Codex / Claude / Antigravity · enter launch · **`d`** set default |
 
 Title shows the template name; `★` means it is the saved default.
 
-### Launch Grok Build (`g`)
+### Launch coding agents (`g` / `Shift+g`)
 
-Requires the [Grok Build](https://docs.x.ai/build/overview) CLI (`grok` on
-`PATH` or `~/.grok/bin/grok`).
+Supported CLIs (interactive TUI in a **separate terminal**):
+
+| Agent | Binary | Notes |
+|---|---|---|
+| **Grok Build** (default) | `grok` | `--fullscreen` + bootstrap; opt-in headless via `grok_mode` |
+| **Codex** | `codex` | `codex -C <repo> "<bootstrap>"` |
+| **Claude Code** | `claude` | `claude --add-dir <repo> "<bootstrap>"` |
+| **Antigravity** | `agy` | `agy --add-dir <repo> --prompt-interactive "<bootstrap>"` |
+
+Set the **local decomp path** so tools run in the right tree:
+
+```bash
+chaos projects local-repo <id> /path/to/your-decomp
+```
+
+Resolution order for repo cwd + prompt preamble:
+
+1. Profile `local_repo` in `projects.toml`
+2. `grok_default_repo` in `config.toml` (shared fallback name)
+3. Heuristic from a **local** atlas path (not GitHub URLs)
 
 Optional keys in `~/.config/chaos/config.toml`:
 
 ```toml
-grok_bin = "grok"                 # or absolute path
-grok_mode = "run"                 # "run" (default, headless) | "interactive"
-grok_extra_args = ["--always-approve"]
+default_agent = "grok"            # grok | codex | claude | antigravity  (`g` uses this)
+grok_bin = "grok"
+codex_bin = "codex"
+claude_bin = "claude"
+antigravity_bin = "agy"
+grok_mode = "interactive"         # Grok only: interactive | run (headless)
+grok_extra_args = []
+codex_extra_args = []
+claude_extra_args = []
+antigravity_extra_args = []
+grok_default_repo = "~/src/my-decomp"
+grok_terminal = "auto"            # auto | terminal | iterm | linux | windows
 ```
 
-- **run** (default): `grok --prompt-file ~/.config/chaos/last-grok-prompt.md --verbatim`
-  so Grok **executes** the match task without manual paste.
-- **interactive**: opens the Grok TUI with a short bootstrap that points at that
-  file (avoids huge command lines).
-- Local atlas path → also passes `--cwd` so tools run in the decomp tree.
+- Full match text is written to `~/.config/chaos/last-agent-prompt.md` (and
+  legacy `last-grok-prompt.md`). Agents get a short bootstrap pointing at that
+  file so argv stays small.
+- Launcher script: `~/.config/chaos/last-agent-run.command` (macOS `open`).
 - Prompt is always copied to the clipboard as a fallback.
+- In the picker, **`d`** saves `default_agent` for next **`g`**.
 
 ### New template flow
 
