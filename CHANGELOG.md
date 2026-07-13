@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-project conventions** (`default` | `experimental`): set on the Projects
+  hub with **`v`**, or via `chaos projects add … --convention` /
+  `chaos projects convention <id> <name>`. Default is current sm64ds-compatible
+  tracking; experimental is identical for now and is the only place future
+  tracking changes will land. Stored in `projects.toml`.
 - **Clear batch** (`Shift+b`): empty the prompt batch in one keypress (same idea
   as chaos-viewer’s clear control). Shown in help, chrome hints, and the detail
   footer when the batch is non-empty.

@@ -18,17 +18,33 @@ for the right repo instead of reloading a stashed electroplankton/sm64 raw file.
 
 Suggested ids use the **repo name** (`sm64ds-decomp`), never a mangled full URL.
 
+Each profile also stores a **data-tracking convention** (see below).
+
+## Conventions
+
+Per-project switch for how this CLI tracks / interprets atlas data:
+
+| Convention | Meaning |
+|---|---|
+| **default** | Current chaos-viewer / sm64ds-compatible behavior (the only mode before this feature). Keep sm64ds (and other upstream-shaped repos) on this. |
+| **experimental** | Opt-in fork for alternate tracking. **Behaves identically to default for now.** Future tracking experiments apply only to experimental profiles so default work (e.g. sm64ds) stays stable. |
+
+Missing `convention` keys in older `projects.toml` files load as **default**.
+
 ## CLI
 
 ```bash
 # Add profiles
 chaos projects add sm64ds --source https://github.com/tangosdev/sm64ds-decomp --use-now
+chaos projects add my-exp --source https://github.com/you/my-repo --convention experimental
 chaos projects add electro --source /path/to/electroplankton/chaos-db.json
 chaos projects add ep-url --source https://raw.githubusercontent.com/…/chaos-db.json
 
-# List / select
+# List / select / convention
 chaos projects list
 chaos projects use electro
+chaos projects convention my-exp experimental
+chaos projects convention sm64ds default
 chaos projects remove old-id
 chaos projects dir
 
@@ -46,10 +62,12 @@ export CHAOS_PROJECT=sm64ds
 - Hub keys:
   - **j/k** — select saved project
   - **enter** — load selected project (or typed source if input focused)
+  - **v** — cycle selected project’s convention (`default` ↔ `experimental`) and save
   - **tab** — focus list ↔ freeform source input
   - **type** — start a source path / URL (switches focus to the input)
   - **Shift+s** — save current source as a named profile (type id, enter)
   - **d** — delete selected profile (asks **y/n** first)
   - **esc** — back to Overview if something is already loaded
 
-Header shows the active profile id when loaded.
+Header shows the active profile id and convention when loaded.
+List rows show `[default]` / `[experimental]` next to each id.

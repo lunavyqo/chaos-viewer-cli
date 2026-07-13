@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::conventions::Convention;
 use crate::templates::{chaos_home, load_user_config, save_user_config};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +26,10 @@ pub struct ProjectProfile {
     /// Optional branch for GitHub discovery.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Data-tracking convention for this profile (`default` or `experimental`).
+    /// Missing key in older `projects.toml` deserializes as Default.
+    #[serde(default)]
+    pub convention: Convention,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -245,11 +250,38 @@ mod tests {
                 name: "Demo".into(),
                 source: "https://github.com/you/demo".into(),
                 branch: None,
+                convention: Convention::Default,
             })
             .unwrap();
         store.set_active(Some("demo")).unwrap();
         let store2 = ProjectStore::load_from_home(dir.path());
         assert_eq!(store2.active_id.as_deref(), Some("demo"));
         assert_eq!(store2.projects.len(), 1);
+        assert_eq!(store2.projects[0].convention, Convention::Default);
+    }
+
+    #[test]
+    fn convention_roundtrip_and_default_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("projects.toml");
+        // Old file without convention key → Default.
+        fs::write(
+            &path,
+            r#"
+[[projects]]
+id = "legacy"
+name = "Legacy"
+source = "https://github.com/you/legacy"
+"#,
+        )
+        .unwrap();
+        let store = ProjectStore::load_from_home(dir.path());
+        assert_eq!(store.projects[0].convention, Convention::Default);
+
+        let mut store = ProjectStore::load_from_home(dir.path());
+        store.projects[0].convention = Convention::Experimental;
+        store.save().unwrap();
+        let store2 = ProjectStore::load_from_home(dir.path());
+        assert_eq!(store2.projects[0].convention, Convention::Experimental);
     }
 }
