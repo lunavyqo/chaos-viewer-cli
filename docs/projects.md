@@ -43,6 +43,12 @@ Missing `convention` keys in older `projects.toml` files load as **default**.
    missing or incomplete under an experimental profile. Default profiles never
    require the field (sm64ds atlases stay unchanged).
 
+2. **Stock prompt `chaos-experimental`**  
+   Built-in Prompt template that tells the model to emit a `MATCH_RESULT` block
+   per function with filled `matchProvenance`. Auto-selected when you load an
+   experimental profile (if you were still on `chaos-viewer`). Press **`t`** on
+   the Prompt page to cycle templates.
+
 ## CLI
 
 ```bash

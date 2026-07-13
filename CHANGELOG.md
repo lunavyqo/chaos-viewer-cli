@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Built-in prompt **`chaos-experimental`**: stock match prompt that requires
+  models to emit `MATCH_RESULT` with **model / reasoning / harness** (or human)
+  provenance. Auto-selected when loading an experimental project from the
+  default `chaos-viewer` template. Cycle with **`t`** on Prompt.
 - **Experimental match provenance**: under the experimental convention, every
   matched function should record `matchProvenance` — either `human` or `ai`
   with **model**, **reasoning** level, and **harness**. Shown on the Overview

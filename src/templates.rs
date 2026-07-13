@@ -1,4 +1,4 @@
-//! Prompt templates: built-in chaos-viewer prompt plus user TOML templates.
+//! Prompt templates: built-in prompts plus user TOML templates.
 //!
 //! Layout on disk (override with `CHAOS_HOME`):
 //! ```text
@@ -8,7 +8,9 @@
 //!     short.toml                # user-defined
 //! ```
 //!
-//! Builtin id `chaos-viewer` is always available (compiled-in parity with the web app).
+//! Built-ins:
+//! - `chaos-viewer` — web parity (default / sm64ds)
+//! - `chaos-experimental` — match task + mandatory matchProvenance reporting
 
 use std::collections::HashMap;
 use std::fs;
@@ -19,11 +21,18 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::claims::ClaimsSession;
-use crate::prompt::{build_builtin_prompt, PromptOptions};
+use crate::prompt::{build_builtin_prompt, build_experimental_prompt, PromptOptions};
 use crate::schema::{ChaosFunction, FunctionDetail, ProjectConfig};
 
 pub const BUILTIN_ID: &str = "chaos-viewer";
 pub const BUILTIN_NAME: &str = "Chaos Viewer (default)";
+/// Experimental convention: provenance-aware match prompt.
+pub const BUILTIN_EXPERIMENTAL_ID: &str = "chaos-experimental";
+pub const BUILTIN_EXPERIMENTAL_NAME: &str = "Chaos Experimental (provenance)";
+
+pub fn is_builtin_template_id(id: &str) -> bool {
+    id == BUILTIN_ID || id == BUILTIN_EXPERIMENTAL_ID
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UserConfig {
@@ -92,13 +101,24 @@ impl TemplateStore {
         // Seed example template once if the directory is empty (besides nothing).
         seed_example_template(&templates_dir);
 
-        let mut entries = vec![TemplateEntry {
-            id: BUILTIN_ID.into(),
-            name: BUILTIN_NAME.into(),
-            description: "Built-in prompt matching tangosdev/chaos-viewer".into(),
-            kind: TemplateKind::Builtin,
-            path: None,
-        }];
+        let mut entries = vec![
+            TemplateEntry {
+                id: BUILTIN_ID.into(),
+                name: BUILTIN_NAME.into(),
+                description: "Built-in prompt matching tangosdev/chaos-viewer".into(),
+                kind: TemplateKind::Builtin,
+                path: None,
+            },
+            TemplateEntry {
+                id: BUILTIN_EXPERIMENTAL_ID.into(),
+                name: BUILTIN_EXPERIMENTAL_NAME.into(),
+                description:
+                    "Experimental: match + required model/reasoning/harness (or human) provenance"
+                        .into(),
+                kind: TemplateKind::Builtin,
+                path: None,
+            },
+        ];
 
         if let Ok(rd) = fs::read_dir(&templates_dir) {
             let mut files: Vec<PathBuf> = rd
@@ -183,9 +203,9 @@ impl TemplateStore {
 
     /// Resolve a user template path for editing. Built-in has no file.
     pub fn editable_path(&self, id: &str) -> Result<PathBuf> {
-        if id == BUILTIN_ID {
+        if is_builtin_template_id(id) {
             bail!(
-                "'{BUILTIN_ID}' is built-in and has no file; press n (or `chaos templates new`) to make an editable copy"
+                "'{id}' is built-in and has no file; press n (or `chaos templates new`) to make an editable copy"
             );
         }
         match self.path_for(id) {
@@ -199,8 +219,8 @@ impl TemplateStore {
     /// Returns the path written. Does not open an editor.
     pub fn create_from_builtin(&self, id: &str, display_name: Option<&str>) -> Result<PathBuf> {
         let id = sanitize_template_id(id)?;
-        if id == BUILTIN_ID {
-            bail!("'{BUILTIN_ID}' is reserved for the built-in template");
+        if is_builtin_template_id(&id) {
+            bail!("'{id}' is reserved for a built-in template");
         }
         fs::create_dir_all(&self.templates_dir)?;
         let path = self.templates_dir.join(format!("{id}.toml"));
@@ -227,6 +247,9 @@ impl TemplateStore {
             .get(id)
             .with_context(|| format!("unknown template '{id}'"))?;
         match &entry.kind {
+            TemplateKind::Builtin if entry.id == BUILTIN_EXPERIMENTAL_ID => {
+                Ok(build_experimental_prompt(project, functions, opts))
+            }
             TemplateKind::Builtin => Ok(build_builtin_prompt(project, functions, opts)),
             TemplateKind::User(t) => Ok(render_user_template(t, project, functions, opts)),
         }
@@ -748,9 +771,34 @@ mod tests {
         std::env::set_var("CHAOS_HOME", dir.path());
         let store = TemplateStore::load();
         assert!(store.get(BUILTIN_ID).is_some());
+        assert!(store.get(BUILTIN_EXPERIMENTAL_ID).is_some());
         assert_eq!(store.default_id(), BUILTIN_ID);
         // example short.toml seeded
         assert!(dir.path().join("templates/short.toml").exists());
+        std::env::remove_var("CHAOS_HOME");
+    }
+
+    #[test]
+    fn experimental_builtin_renders_provenance_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CHAOS_HOME", dir.path());
+        let store = TemplateStore::load();
+        let project = ProjectConfig {
+            name: "exp-demo".into(),
+            github: "https://github.com/you/exp".into(),
+            ..Default::default()
+        };
+        let fn_ = sample_fn();
+        let text = store
+            .render(
+                BUILTIN_EXPERIMENTAL_ID,
+                &project,
+                &[(fn_, None)],
+                &PromptOptions::default(),
+            )
+            .unwrap();
+        assert!(text.contains("MATCH_RESULT"));
+        assert!(text.contains("matchProvenance"));
         std::env::remove_var("CHAOS_HOME");
     }
 
