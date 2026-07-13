@@ -40,9 +40,17 @@ Missing `convention` keys in older `projects.toml` files load as **default**.
    Experimental requires complete `matchProvenance` on matched functions; credit
    still uses `author` only. Default profiles never require provenance.
 
-2. **Stock prompt `chaos-experimental`**  
-   Emits `MATCH_RESULT` with `author` (credit) + `matchProvenance` (method).
-   Auto-selected when loading an experimental profile from `chaos-viewer`.
+2. **Every attempt logged**  
+   Experimental work should append **every try** (including `no_progress` and
+   non-improving near-misses) to the decomp’s attempt log (e.g.
+   `config/match_attempts.jsonl` via `tools/log_attempt.py`). The
+   `chaos-experimental` prompt requires a MATCH_RESULT per function per
+   iteration. Full history is **not** stuffed into `chaos-db.json` (size);
+   the atlas keeps lean credit + final how.
+
+3. **Stock prompt `chaos-experimental`**  
+   Emits `MATCH_RESULT` with `author` (credit) + `matchProvenance` (method) +
+   attempt status/scores. Auto-selected when loading an experimental profile.
 
 ## CLI
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Experimental **attempt logging** in the stock prompt: every matching iteration
+  must emit a MATCH_RESULT (`no_progress` / non-improving near-miss included).
+  Full history stays in the decomp attempt log, not `chaos-db.json`.
+
 ### Fixed
 
 - Experimental tracking: **who = `author` only** (classic chaos-viewer credit);

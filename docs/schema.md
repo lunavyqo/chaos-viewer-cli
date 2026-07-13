@@ -84,6 +84,15 @@ function should record **how** it was matched:
 Legacy ledgers may still contain `matchProvenance.by`; the CLI ignores it for
 credit (use `author`).
 
+### Full attempt history (experimental decomp repos)
+
+Per-try history lives in the **decomp project** (e.g.
+`config/match_attempts.jsonl`), not in the published atlas. Every iteration
+should be appended — matched, near-miss, no_progress, compile_error, failed,
+skipped — even when near-miss did not improve. See the experimental project’s
+`tools/log_attempt.py` / `notes/match-attempts.md`. The stock
+`chaos-experimental` prompt requires a MATCH_RESULT block for each try.
+
 ## Detail chunks (optional)
 
 `details/<module>.json` next to the atlas file:
