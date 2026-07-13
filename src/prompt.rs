@@ -165,11 +165,10 @@ EXPERIMENTAL — WHO vs HOW vs EVERY TRY
 WHO (credit, contributor colors) → function field `author` (GitHub login)
 HOW  (final method when banked)  → `matchProvenance` only
 EVERY TRY (including dead ends)  → log a MATCH_RESULT every iteration
-CONTEXT FOCUS                    → sessionScope + batchSize (required)
-
-sessionScope tracks whether matching context was solo or multi-function:
-  focused — session was specifically for this one function (richer focus)
-  batch   — this function shared a multi-function session/prompt
+CONTEXT FOCUS (required on EVERY attempt — same tier as model/harness):
+  sessionScope + batchSize must appear on every MATCH_RESULT, every try.
+  focused — session was only for this one function
+  batch   — multi-function session (this target was one of N)
 
 {scope_line}
 
@@ -228,10 +227,10 @@ MATCH_RESULT:
   addr: "0x{addr:x}"
   size: {size}
   status: no_progress   # matched | near_miss | no_progress | compile_error | failed | skipped
-  # CONTEXT (required): was this a solo session or a multi-function batch?
+  # REQUIRED every run (same tier as model/harness — never omit):
   sessionScope: {session_scope}   # focused | batch
   batchSize: {batch_size}         # 1 if focused; N if batch
-  # WHO (classic credit — only required when status=matched; still preferred always):
+  # WHO (classic credit — required when status=matched; preferred always):
   author: "{author}"            {author_comment}
   # HOW this try was run (required for kind=ai on every attempt):
   matchProvenance:
@@ -289,8 +288,9 @@ EXPERIMENTAL — BEFORE YOU FINISH
 ======================================================================
 1. For EACH function, emit a filled MATCH_RESULT for **this iteration**.
 2. status must reflect reality (prefer no_progress over silence).
-3. Always set sessionScope={session_scope} and batchSize={batch_size} (this prompt).
-   focused = solo session for one function; batch = multi-function session.
+3. ALWAYS set sessionScope={session_scope} and batchSize={batch_size} on every
+   MATCH_RESULT (every function, every try) — not optional; like model/harness.
+   focused = solo session; batch = multi-function session.
 4. If status=matched (verify says MATCH):
    - matchProvenance kind=ai → model + reasoning + harness (slug tokens)
    - matchProvenance kind=human → no model fields; optional note only

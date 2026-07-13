@@ -13,10 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Experimental **session scope** on attempts: `sessionScope` (`focused` vs
-  `batch`) + `batchSize` — whether the matching session was solo or multi-function.
-  Stock prompt prefills from current batch size; decomp `log_attempt` / `bank`
-  accept `--session-scope` / `--batch-size`.
+- Experimental **session scope** on **every** attempt (required like model/harness):
+  `sessionScope` (`focused`|`batch`) + `batchSize`. Prompt prefills from batch
+  size; decomp `log_attempt` / `bank` require `--session-scope`.
 - Experimental **attempt logging** in the stock prompt: every matching iteration
   must emit a MATCH_RESULT (`no_progress` / non-improving near-miss included).
   Full history stays in the decomp attempt log, not `chaos-db.json`.
