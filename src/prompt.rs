@@ -70,12 +70,36 @@ pub fn build_experimental_prompt(
     };
     let author = operator_github_handle(opts);
     let mut parts: Vec<String> = Vec::new();
-    parts.push(prompt_header_experimental(project, n, &author));
+    // Session scope for attempt logging: solo vs multi-function context.
+    let (session_scope, batch_size) = if n <= 1 {
+        ("focused", 1usize)
+    } else {
+        ("batch", n)
+    };
+    parts.push(prompt_header_experimental(
+        project,
+        n,
+        &author,
+        session_scope,
+        batch_size,
+    ));
     for (fn_, det) in functions {
         parts.push(prompt_section(project, fn_, det.as_ref()));
-        parts.push(prompt_provenance_block(fn_, &author));
+        parts.push(prompt_provenance_block(
+            fn_,
+            &author,
+            session_scope,
+            batch_size,
+        ));
     }
-    parts.push(prompt_footer_experimental(project, n, opts, &author));
+    parts.push(prompt_footer_experimental(
+        project,
+        n,
+        opts,
+        &author,
+        session_scope,
+        batch_size,
+    ));
     parts.join("\n\n")
 }
 
@@ -101,7 +125,13 @@ fn operator_github_handle(opts: &PromptOptions) -> String {
     "YOUR_GITHUB_LOGIN".into()
 }
 
-fn prompt_header_experimental(project: &ProjectConfig, n: usize, author: &str) -> String {
+fn prompt_header_experimental(
+    project: &ProjectConfig,
+    n: usize,
+    author: &str,
+    session_scope: &str,
+    batch_size: usize,
+) -> String {
     let mut base = prompt_header(project, n);
     let author_line = if author == "YOUR_GITHUB_LOGIN" {
         "  author     = REQUIRED credit field: operator GitHub login (same as classic \
@@ -114,6 +144,18 @@ chaos-viewer).\n               Put it on MATCH_RESULT.author — NOT inside matc
 Same field as contributor colors."
         )
     };
+    let scope_line = if session_scope == "focused" {
+        format!(
+            "  sessionScope = focused  (this prompt is for ONE function; batchSize={batch_size})\n\
+               Keep sessionScope=focused and batchSize=1 on every MATCH_RESULT."
+        )
+    } else {
+        format!(
+            "  sessionScope = batch  (this prompt covers {batch_size} functions together)\n\
+               Keep sessionScope=batch and batchSize={batch_size} on every MATCH_RESULT.\n\
+               Do not claim focused unless you later re-ran a solo session for one function."
+        )
+    };
     base.push_str(&format!(
         r#"
 
@@ -123,6 +165,13 @@ EXPERIMENTAL — WHO vs HOW vs EVERY TRY
 WHO (credit, contributor colors) → function field `author` (GitHub login)
 HOW  (final method when banked)  → `matchProvenance` only
 EVERY TRY (including dead ends)  → log a MATCH_RESULT every iteration
+CONTEXT FOCUS                    → sessionScope + batchSize (required)
+
+sessionScope tracks whether matching context was solo or multi-function:
+  focused — session was specifically for this one function (richer focus)
+  batch   — this function shared a multi-function session/prompt
+
+{scope_line}
 
 You MUST emit a MATCH_RESULT for **each function in this batch on every
 attempt**, even when:
@@ -150,12 +199,18 @@ Do NOT invent a match. VERIFY until MATCH.
 Do NOT omit MATCH_RESULT because the try was "useless" — useless tries are data.
 Do NOT put secrets or full chain-of-thought dumps into the log.
 "#,
+        scope_line = scope_line,
         author_line = author_line,
     ));
     base
 }
 
-fn prompt_provenance_block(fn_: &ChaosFunction, author: &str) -> String {
+fn prompt_provenance_block(
+    fn_: &ChaosFunction,
+    author: &str,
+    session_scope: &str,
+    batch_size: usize,
+) -> String {
     let author_comment = if author == "YOUR_GITHUB_LOGIN" {
         "# REQUIRED GitHub login for credit (classic author field). Replace placeholder."
     } else {
@@ -173,6 +228,9 @@ MATCH_RESULT:
   addr: "0x{addr:x}"
   size: {size}
   status: no_progress   # matched | near_miss | no_progress | compile_error | failed | skipped
+  # CONTEXT (required): was this a solo session or a multi-function batch?
+  sessionScope: {session_scope}   # focused | batch
+  batchSize: {batch_size}         # 1 if focused; N if batch
   # WHO (classic credit — only required when status=matched; still preferred always):
   author: "{author}"            {author_comment}
   # HOW this try was run (required for kind=ai on every attempt):
@@ -199,6 +257,8 @@ MATCH_RESULT:
         size = fn_.size,
         author = author,
         author_comment = author_comment,
+        session_scope = session_scope,
+        batch_size = batch_size,
     )
 }
 
@@ -207,6 +267,8 @@ fn prompt_footer_experimental(
     n: usize,
     opts: &PromptOptions,
     author: &str,
+    session_scope: &str,
+    batch_size: usize,
 ) -> String {
     let mut lines = prompt_footer(project, n, opts);
     let author_rule = if author == "YOUR_GITHUB_LOGIN" {
@@ -227,20 +289,25 @@ EXPERIMENTAL — BEFORE YOU FINISH
 ======================================================================
 1. For EACH function, emit a filled MATCH_RESULT for **this iteration**.
 2. status must reflect reality (prefer no_progress over silence).
-3. If status=matched (verify says MATCH):
+3. Always set sessionScope={session_scope} and batchSize={batch_size} (this prompt).
+   focused = solo session for one function; batch = multi-function session.
+4. If status=matched (verify says MATCH):
    - matchProvenance kind=ai → model + reasoning + harness (slug tokens)
    - matchProvenance kind=human → no model fields; optional note only
 {author_rule}
-4. If near_miss: include divergences (+ draft when available). Still log if
+5. If near_miss: include divergences (+ draft when available). Still log if
    it did NOT beat prevBestDivergences (improvedNearMiss: false).
-5. Operators append every MATCH_RESULT into config/match_attempts.jsonl
-   (tools/log_attempt.py). Bank success also writes the final how-record.
-6. Open a PR when matched; PR author should match `author`.
+6. Operators append every MATCH_RESULT into config/match_attempts.jsonl
+   (tools/log_attempt.py --session-scope … --batch-size …). Bank success
+   also writes the final how-record (pass the same scope flags).
+7. Open a PR when matched; PR author should match `author`.
 
 Refuse to claim "matched" without verify succeeding.
 Never skip logging a failed/empty try.
 "#,
         author_rule = author_rule,
+        session_scope = session_scope,
+        batch_size = batch_size,
     ));
     lines
 }
@@ -499,7 +566,10 @@ mod tests {
         assert!(text.contains("harness:"));
         assert!(text.contains("BEFORE YOU FINISH"));
         assert!(text.contains("improvedNearMiss"));
-        // Credit uses classic author field, not provenance.by
+        assert!(text.contains("sessionScope"));
+        assert!(text.contains("batchSize"));
+        assert!(text.contains("focused")); // single-fn sample → focused
+                                           // Credit uses classic author field, not provenance.by
         assert!(text.contains("author:"));
         assert!(text.contains("YOUR_GITHUB_LOGIN") || text.contains("GitHub"));
         assert!(!text.contains("by: \""));
@@ -522,6 +592,20 @@ mod tests {
         assert!(!text.contains("YOUR_GITHUB_LOGIN"));
         // method block has no by:
         assert!(!text.contains("\n    by:"));
+    }
+
+    #[test]
+    fn experimental_prompt_batch_scope_when_multiple_functions() {
+        let project = sample_project();
+        let a = sample_fn();
+        let mut b = sample_fn();
+        b.name = "func_other".into();
+        b.id = "arm9:0x20009e1".into();
+        let text =
+            build_experimental_prompt(&project, &[(a, None), (b, None)], &PromptOptions::default());
+        assert!(text.contains("sessionScope: batch"));
+        assert!(text.contains("batchSize: 2"));
+        assert!(text.contains("sessionScope = batch"));
     }
 
     #[test]

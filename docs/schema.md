@@ -93,6 +93,15 @@ skipped — even when near-miss did not improve. See the experimental project’
 `tools/log_attempt.py` / `notes/match-attempts.md`. The stock
 `chaos-experimental` prompt requires a MATCH_RESULT block for each try.
 
+Each attempt also records **context focus**:
+
+| Field | Meaning |
+|---|---|
+| `sessionScope: focused` | Session was only about this function |
+| `sessionScope: batch` | Multi-function session; include `batchSize` ≥ 2 |
+
+Hypothesis to measure: focused sessions may land matches more often than batch.
+
 ## Detail chunks (optional)
 
 `details/<module>.json` next to the atlas file:
