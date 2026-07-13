@@ -53,6 +53,123 @@ pub fn build_builtin_prompt(
     parts.join("\n\n")
 }
 
+/// Built-in **experimental** prompt: chaos-viewer match task + mandatory
+/// match-provenance reporting (model, reasoning level, harness — or human).
+///
+/// For projects on the experimental convention. Does not change the default
+/// `chaos-viewer` template (sm64ds / upstream parity).
+pub fn build_experimental_prompt(
+    project: &ProjectConfig,
+    functions: &[(ChaosFunction, Option<FunctionDetail>)],
+    opts: &PromptOptions,
+) -> String {
+    let n = if functions.is_empty() {
+        1
+    } else {
+        functions.len()
+    };
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(prompt_header_experimental(project, n));
+    for (fn_, det) in functions {
+        parts.push(prompt_section(project, fn_, det.as_ref()));
+        parts.push(prompt_provenance_block(fn_));
+    }
+    parts.push(prompt_footer_experimental(project, n, opts));
+    parts.join("\n\n")
+}
+
+fn prompt_header_experimental(project: &ProjectConfig, n: usize) -> String {
+    let mut base = prompt_header(project, n);
+    base.push_str(
+        r#"
+
+======================================================================
+EXPERIMENTAL CONVENTION — MATCH PROVENANCE (MANDATORY)
+======================================================================
+This project tracks HOW each function was matched. You MUST report provenance
+for every function in this batch. Incomplete AI provenance is a failed task.
+
+When you are an AI agent matching code:
+  kind       = ai
+  model      = the exact model id you are (e.g. claude-opus-4, gpt-5.2)
+  reasoning  = your configured reasoning/effort level (high|medium|low|none|…)
+  harness    = the tool/pipeline running you (e.g. cursor-agent, claude-code,
+               codex-cli, fanout-v3, chaos-batch — short stable token)
+
+When a human matched without AI:
+  kind = human
+  by   = their handle if known
+
+Do NOT invent a match. VERIFY with the command below until it reports MATCH.
+Do NOT skip the MATCH_RESULT block(s) at the end of your reply.
+Do NOT put secrets, API keys, or full chain-of-thought dumps into provenance —
+only model id, reasoning level, and harness name.
+"#,
+    );
+    base
+}
+
+fn prompt_provenance_block(fn_: &ChaosFunction) -> String {
+    format!(
+        r#"----------------------------------------------------------------------
+MATCH_RESULT template for {name} (fill this in your FINAL reply; copy one
+block per function; leave status=near_miss|failed if not matched yet)
+
+```yaml
+MATCH_RESULT:
+  function: {name}
+  module: {module}
+  addr: "0x{addr:x}"
+  size: {size}
+  status: matched   # matched | near_miss | failed
+  # If status=matched, provenance is REQUIRED:
+  matchProvenance:
+    kind: ai        # ai | human
+    model: "<YOUR_MODEL_ID>"
+    reasoning: "<YOUR_REASONING_OR_EFFORT_LEVEL>"
+    harness: "<YOUR_HARNESS_OR_AGENT_NAME>"
+    # by: "<optional operator handle>"
+  # If near_miss: include draft C and estimated instruction divergence:
+  # nearMiss:
+  #   divergences: <int>
+  #   c_source: |
+  #     ...
+```
+"#,
+        name = fn_.name,
+        module = fn_.module,
+        addr = fn_.addr,
+        size = fn_.size,
+    )
+}
+
+fn prompt_footer_experimental(project: &ProjectConfig, n: usize, opts: &PromptOptions) -> String {
+    // Start from default footer, then append experimental banking rules.
+    let mut lines = prompt_footer(project, n, opts);
+    lines.push_str(
+        r#"
+
+======================================================================
+EXPERIMENTAL — BEFORE YOU FINISH
+======================================================================
+1. For EACH function above, emit a filled MATCH_RESULT YAML block (see template).
+2. If status=matched (verify says MATCH):
+   - kind=ai  → model + reasoning + harness MUST be non-empty real values
+     (not placeholders like YOUR_MODEL_ID).
+   - kind=human → only when no model was used; set by if known.
+3. If status=near_miss: still emit MATCH_RESULT with nearMiss draft so the
+   operator can ingest it; provenance on near-miss is optional but helpful.
+4. Atlas / ledger operators will store matchProvenance on the matched function
+   in chaos-db.json. Your MATCH_RESULT is the source of truth for that record.
+5. Opening a PR is still required when matched (see above); mention model +
+   harness briefly in the PR body.
+
+Refuse to claim "matched" without the verify command succeeding.
+"#,
+    );
+    lines
+}
+
 /// Template fill matching web `fillTemplate` placeholders exactly.
 fn fill_template(t: &str, project: &ProjectConfig, fn_: &ChaosFunction) -> String {
     t.replace("{github}", &project.github)
@@ -290,6 +407,24 @@ mod tests {
             sibling: Some("func_scaffold".into()),
             match_provenance: None,
         }
+    }
+
+    #[test]
+    fn experimental_prompt_requires_provenance_blocks() {
+        let project = sample_project();
+        let fn_ = sample_fn();
+        let text = build_experimental_prompt(&project, &[(fn_, None)], &PromptOptions::default());
+        assert!(text.contains("EXPERIMENTAL CONVENTION"));
+        assert!(text.contains("MATCH_RESULT"));
+        assert!(text.contains("matchProvenance"));
+        assert!(text.contains("func_020009e0"));
+        assert!(text.contains("model:"));
+        assert!(text.contains("reasoning:"));
+        assert!(text.contains("harness:"));
+        assert!(text.contains("BEFORE YOU FINISH"));
+        // Still includes core match task bits
+        assert!(text.contains("byte-for-byte"));
+        assert!(text.contains("VERIFY"));
     }
 
     #[test]

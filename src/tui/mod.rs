@@ -30,7 +30,7 @@ use crate::prioritize::{priority_rows, PriorityMode};
 use crate::projects::{ProjectProfile, ProjectStore};
 use crate::prompt::{batch_max, PromptOptions};
 use crate::schema::{format_pct, ChaosDb, ChaosFunction, FunctionDetail, ProjectConfig};
-use crate::templates::TemplateStore;
+use crate::templates::{TemplateStore, BUILTIN_EXPERIMENTAL_ID, BUILTIN_ID};
 use crate::treemap::{layout_treemap, TreemapLeaf};
 use theme::Theme;
 
@@ -432,6 +432,7 @@ impl App {
             should_quit: false,
         };
         app.prompt_template_id = app.template_store.default_id().to_string();
+        app.sync_template_to_convention();
         Ok(app)
     }
 
@@ -691,12 +692,14 @@ PRIORITIES
 PROMPT
   j / k       scroll prompt text
   pgup/pgdn   scroll prompt by page
-  t           next prompt template (builtin + ~/.config/chaos/templates)
+  t           next prompt template (builtins + ~/.config/chaos/templates)
+              builtins: chaos-viewer (default) · chaos-experimental (provenance)
   n           new template (copy of chaos-viewer → editor)
   e           edit current user template in $EDITOR / nano
   Shift+t     set current template as default
   c           copy batch prompt
   Shift+b     clear entire batch
+  experimental projects auto-select chaos-experimental when on chaos-viewer
 
 SETUP / PROJECTS
   type        source path / URL / GitHub (always works; focuses the input)
@@ -764,10 +767,12 @@ Press ? or esc to close help."#
                 self.project_sel = i;
             }
             self.convention = p.convention;
+            self.sync_template_to_convention();
         } else {
             // Don't keep showing e.g. electroplankton as active after freeform-loading sm64ds.
             let _ = self.project_store.set_active(None);
             self.convention = Convention::Default;
+            self.sync_template_to_convention();
         }
     }
 
@@ -786,6 +791,7 @@ Press ? or esc to close help."#
             self.project_sel = i;
         }
         self.convention = profile.convention;
+        self.sync_template_to_convention();
         self.status = format!(
             "Loaded project {} ({}) · [{}] · {}",
             profile.name,
@@ -809,9 +815,29 @@ Press ? or esc to close help."#
         // If this profile is active / currently loaded, keep session in sync.
         if self.project_store.active_id.as_deref() == Some(id.as_str()) {
             self.convention = next;
+            self.sync_template_to_convention();
         }
         self.status = format!("Project '{id}' convention → {}", next.label());
         Ok(())
+    }
+
+    /// Prefer stock experimental prompt when on experimental convention (and vice versa).
+    /// Does not override a user-selected custom template.
+    fn sync_template_to_convention(&mut self) {
+        match self.convention {
+            Convention::Experimental => {
+                if self.prompt_template_id == BUILTIN_ID
+                    && self.template_store.get(BUILTIN_EXPERIMENTAL_ID).is_some()
+                {
+                    self.prompt_template_id = BUILTIN_EXPERIMENTAL_ID.to_string();
+                }
+            }
+            Convention::Default => {
+                if self.prompt_template_id == BUILTIN_EXPERIMENTAL_ID {
+                    self.prompt_template_id = BUILTIN_ID.to_string();
+                }
+            }
+        }
     }
 
     /// Source string to persist for a profile — original GitHub/path, never discovered raw atlas URL.

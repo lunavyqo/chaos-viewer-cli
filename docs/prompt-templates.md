@@ -1,8 +1,15 @@
 # Prompt templates
 
-`chaos` ships one **built-in** prompt (`chaos-viewer`) that matches
-[tangosdev/chaos-viewer](https://github.com/tangosdev/chaos-viewer). You can add
-more templates, pick them in the TUI, and set your own default.
+`chaos` ships **built-in** prompts plus optional user TOML templates. You can
+pick them in the TUI and set a default.
+
+| Built-in id | When to use |
+|-------------|-------------|
+| **`chaos-viewer`** | Default / sm64ds — matches [tangosdev/chaos-viewer](https://github.com/tangosdev/chaos-viewer) |
+| **`chaos-experimental`** | Experimental convention — same match task, plus mandatory **match provenance** (model + reasoning + harness, or human) in the model’s reply |
+
+Loading an **experimental** project while the active template is still
+`chaos-viewer` auto-selects `chaos-experimental` (custom templates are left alone).
 
 ## Where files live
 
