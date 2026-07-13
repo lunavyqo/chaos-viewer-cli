@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Experimental prompt / schema docs: require **slug tokens** for model and
+  harness (e.g. `grok-4.5`, `grok-build`) — display names with spaces break
+  common bank/provenance validators.
+
 ### Added
 
 - Built-in prompt **`chaos-experimental`**: stock match prompt that requires

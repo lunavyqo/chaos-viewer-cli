@@ -91,19 +91,28 @@ for every function in this batch. Incomplete AI provenance is a failed task.
 
 When you are an AI agent matching code:
   kind       = ai
-  model      = the exact model id you are (e.g. claude-opus-4, gpt-5.2)
-  reasoning  = your configured reasoning/effort level (high|medium|low|none|…)
-  harness    = the tool/pipeline running you (e.g. cursor-agent, claude-code,
-               codex-cli, fanout-v3, chaos-batch — short stable token)
+  model      = machine token for the model (NO SPACES; slug form)
+  reasoning  = effort/reasoning level token (high|medium|low|none|…)
+  harness    = tool/pipeline token (NO SPACES; lowercase preferred)
+
+TOKEN RULES (validators often reject display names):
+  - model:   letters, digits, . _ + / - only; start alphanumeric; max ~128
+             GOOD: grok-4.5  claude-opus-4  gpt-5.2
+             BAD:  "Grok 4.5"  "Claude Opus 4"  (spaces break banking tools)
+  - harness: lowercase letters, digits, . _ / - ; start [a-z0-9]; max ~64
+             GOOD: grok-build  cursor-agent  claude-code  fanout-v3
+             BAD:  "Grok Build"  "Cursor Agent"
+  - reasoning: same spirit as harness (high, medium, low, none, xhigh, …)
+  If your UI shows a pretty name, slugify it (spaces→-, lower for harness).
 
 When a human matched without AI:
   kind = human
-  by   = their handle if known
+  by   = their handle if known (slug or github login)
 
 Do NOT invent a match. VERIFY with the command below until it reports MATCH.
 Do NOT skip the MATCH_RESULT block(s) at the end of your reply.
 Do NOT put secrets, API keys, or full chain-of-thought dumps into provenance —
-only model id, reasoning level, and harness name.
+only model, reasoning, and harness tokens (or human).
 "#,
     );
     base
@@ -125,10 +134,11 @@ MATCH_RESULT:
   # If status=matched, provenance is REQUIRED:
   matchProvenance:
     kind: ai        # ai | human
-    model: "<YOUR_MODEL_ID>"
-    reasoning: "<YOUR_REASONING_OR_EFFORT_LEVEL>"
-    harness: "<YOUR_HARNESS_OR_AGENT_NAME>"
-    # by: "<optional operator handle>"
+    # Use SLUG tokens (no spaces). Examples:
+    model: "grok-4.5"           # NOT "Grok 4.5"
+    reasoning: "high"
+    harness: "grok-build"       # NOT "Grok Build"
+    # by: "optional-handle"
   # If near_miss: include draft C and estimated instruction divergence:
   # nearMiss:
   #   divergences: <int>
@@ -154,8 +164,8 @@ EXPERIMENTAL — BEFORE YOU FINISH
 ======================================================================
 1. For EACH function above, emit a filled MATCH_RESULT YAML block (see template).
 2. If status=matched (verify says MATCH):
-   - kind=ai  → model + reasoning + harness MUST be non-empty real values
-     (not placeholders like YOUR_MODEL_ID).
+   - kind=ai  → model + reasoning + harness MUST be non-empty SLUG tokens
+     (no spaces; see TOKEN RULES). Not placeholders; not display names.
    - kind=human → only when no model was used; set by if known.
 3. If status=near_miss: still emit MATCH_RESULT with nearMiss draft so the
    operator can ingest it; provenance on near-miss is optional but helpful.
