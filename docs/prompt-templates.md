@@ -41,8 +41,29 @@ On the **Prompt** page (`4`):
 | `e` | **Edit** current user template in `$EDITOR` / nano (not the built-in) |
 | `Shift+t` | Save current as default |
 | `c` | Copy rendered prompt |
+| `g` | **Grok Build**: save prompt file, copy clipboard, leave TUI and run `grok` |
 
 Title shows the template name; `★` means it is the saved default.
+
+### Launch Grok Build (`g`)
+
+Requires the [Grok Build](https://docs.x.ai/build/overview) CLI (`grok` on
+`PATH` or `~/.grok/bin/grok`).
+
+Optional keys in `~/.config/chaos/config.toml`:
+
+```toml
+grok_bin = "grok"                 # or absolute path
+grok_mode = "run"                 # "run" (default, headless) | "interactive"
+grok_extra_args = ["--always-approve"]
+```
+
+- **run** (default): `grok --prompt-file ~/.config/chaos/last-grok-prompt.md --verbatim`
+  so Grok **executes** the match task without manual paste.
+- **interactive**: opens the Grok TUI with a short bootstrap that points at that
+  file (avoids huge command lines).
+- Local atlas path → also passes `--cwd` so tools run in the decomp tree.
+- Prompt is always copied to the clipboard as a fallback.
 
 ### New template flow
 

@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Prompt page **`g`**: launch **Grok Build** with the current batch prompt
+  (writes `~/.config/chaos/last-grok-prompt.md`, copies clipboard, suspends TUI,
+  runs `grok --prompt-file` by default). Config: `grok_bin`, `grok_mode`
+  (`run`|`interactive`), `grok_extra_args` in `config.toml`.
 - Experimental **session scope** on **every** attempt (required like model/harness):
   `sessionScope` (`focused`|`batch`) + `batchSize`. Prompt prefills from batch
   size; decomp `log_attempt` / `bank` require `--session-scope`.

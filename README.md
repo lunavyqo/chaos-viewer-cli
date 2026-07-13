@@ -23,9 +23,10 @@ Early development. Binary name: `chaos`.
 - **Heatmap** tab: view-only squarified byte treemap (same layout math as
   chaos-viewer) — green matched / grey unmatched / yellow claimed
 - Priority lists: nearly done, best scaffolded, biggest unmatched
-- Prompt builder (batch, max 16) with clipboard copy and **`Shift+b`** clear
-  batch; **multiple templates** (built-in `chaos-viewer` + experimental
-  provenance prompt + user TOML under `~/.config/chaos/templates`)
+- Prompt builder (batch, max 16) with clipboard copy, **`g`** to open **Grok
+  Build** with the prompt, and **`Shift+b`** clear batch; **multiple templates**
+  (built-in `chaos-viewer` + experimental provenance prompt + user TOML under
+  `~/.config/chaos/templates`)
 - Optional **pluggable claims** coordination: any HTTP coordinator via
   `project.claimsApi` (not hardcoded to one host) + `CLAIMS.md` merge
 

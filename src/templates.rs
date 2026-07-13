@@ -42,6 +42,15 @@ pub struct UserConfig {
     /// Last / preferred project profile id (`projects.toml`).
     #[serde(default)]
     pub active_project: Option<String>,
+    /// Path or name of the Grok Build binary (`grok`). Empty = PATH / `~/.grok/bin/grok`.
+    #[serde(default)]
+    pub grok_bin: Option<String>,
+    /// `run` (headless, default) or `interactive` (TUI with bootstrap prompt).
+    #[serde(default)]
+    pub grok_mode: Option<String>,
+    /// Extra CLI args for `grok` (e.g. `["--always-approve"]`).
+    #[serde(default)]
+    pub grok_extra_args: Vec<String>,
 }
 
 fn default_template_id() -> String {
