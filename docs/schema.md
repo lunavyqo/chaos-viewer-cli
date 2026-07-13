@@ -41,11 +41,38 @@ This CLI is schema-compatible with
       "cat": "optional",
       "floor": "optional",
       "sim": 0.87,
-      "sibling": "optional"
+      "sibling": "optional",
+      "matchProvenance": {
+        "kind": "ai",
+        "model": "optional under default; required under experimental when matched",
+        "reasoning": "optional reasoning / effort level (e.g. high)",
+        "harness": "optional pipeline id (e.g. fanout-v3)"
+      }
     }
   ]
 }
 ```
+
+### `matchProvenance` (experimental)
+
+Optional on **default** atlases (sm64ds / chaos-viewer ignore it). Under the
+**experimental** project convention, every **matched** function should record
+how it was matched:
+
+| kind | fields |
+|---|---|
+| `"human"` | optional `by`, `note` |
+| `"ai"` | required `model`, `reasoning`, `harness`; optional `by` |
+
+Examples:
+
+```json
+{ "kind": "human", "by": "lunavyqo" }
+{ "kind": "ai", "model": "claude-opus-4", "reasoning": "high", "harness": "fanout-v3", "by": "op" }
+```
+
+The CLI shows this on the Overview detail pane when the active profile is
+experimental, and flags matched functions that omit or incompletely fill it.
 
 ## Detail chunks (optional)
 

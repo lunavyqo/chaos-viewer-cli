@@ -717,6 +717,7 @@ mod tests {
             floor: None,
             sim: None,
             sibling: None,
+            match_provenance: None,
         }
     }
 

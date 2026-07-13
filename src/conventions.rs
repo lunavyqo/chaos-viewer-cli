@@ -1,14 +1,13 @@
 //! Per-project data-tracking conventions.
 //!
 //! Profiles pick a convention in the Projects hub. **Default** is the current
-//! chaos-viewer / sm64ds-compatible behavior. **Experimental** is a fork point
-//! for alternate tracking schemes; for now it behaves identically to Default so
-//! you can opt a personal repo into experimental without breaking sm64ds work.
-//! Future tracking changes land only under [`Convention::Experimental`].
+//! chaos-viewer / sm64ds-compatible behavior. **Experimental** is a fork for
+//! alternate tracking (match provenance, and future changes). Default profiles
+//! never require experimental fields.
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::ChaosFunction;
+use crate::schema::{ChaosFunction, MatchProvenance};
 
 /// How this CLI interprets / tracks atlas data for a saved project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -17,8 +16,8 @@ pub enum Convention {
     /// Current upstream-compatible tracking (sm64ds and friends).
     #[default]
     Default,
-    /// Opt-in fork for experimental tracking. Same as Default until tracking
-    /// changes are applied — then only Experimental profiles diverge.
+    /// Opt-in fork for experimental tracking. Diverges from Default only where
+    /// documented (e.g. required match provenance on matched functions).
     Experimental,
 }
 
@@ -88,11 +87,99 @@ impl Tracking {
     pub fn same_function(convention: Convention, a: &ChaosFunction, b: &ChaosFunction) -> bool {
         Self::function_key(convention, a) == Self::function_key(convention, b)
     }
+
+    /// Match provenance for a function under this convention.
+    ///
+    /// - **Default**: returns atlas field if present (no requirement).
+    /// - **Experimental**: same field; use [`Self::provenance_status`] to check completeness.
+    pub fn match_provenance(
+        _convention: Convention,
+        f: &ChaosFunction,
+    ) -> Option<&MatchProvenance> {
+        f.match_provenance.as_ref()
+    }
+
+    /// Experimental rule: every **matched** function must record how it was matched
+    /// (human, or AI with model + reasoning level + harness).
+    pub fn requires_match_provenance(convention: Convention) -> bool {
+        matches!(convention, Convention::Experimental)
+    }
+
+    /// Status of provenance for display / validation.
+    pub fn provenance_status(convention: Convention, f: &ChaosFunction) -> ProvenanceStatus<'_> {
+        if !f.matched {
+            return ProvenanceStatus::NotMatched;
+        }
+        match convention {
+            Convention::Default => match f.match_provenance.as_ref() {
+                Some(p) => ProvenanceStatus::Present(p),
+                None => ProvenanceStatus::OptionalMissing,
+            },
+            Convention::Experimental => match f.match_provenance.as_ref() {
+                None => ProvenanceStatus::RequiredMissing,
+                Some(p) if p.is_complete() => ProvenanceStatus::Present(p),
+                Some(p) => ProvenanceStatus::Incomplete(p),
+            },
+        }
+    }
+
+    /// Lines for the detail pane (empty under default when nothing recorded).
+    pub fn provenance_detail_lines(convention: Convention, f: &ChaosFunction) -> Vec<String> {
+        match Self::provenance_status(convention, f) {
+            ProvenanceStatus::NotMatched => Vec::new(),
+            ProvenanceStatus::OptionalMissing => Vec::new(),
+            ProvenanceStatus::Present(p) => {
+                vec![format!("matched via: {}", p.summary())]
+            }
+            ProvenanceStatus::RequiredMissing => {
+                vec!["matched via: ⚠ MISSING (experimental requires human or AI provenance)".into()]
+            }
+            ProvenanceStatus::Incomplete(p) => {
+                vec![format!(
+                    "matched via: ⚠ INCOMPLETE · {}  (AI needs model + reasoning + harness)",
+                    p.summary()
+                )]
+            }
+        }
+    }
+}
+
+/// Result of checking match provenance under a convention.
+#[derive(Debug, Clone, Copy)]
+pub enum ProvenanceStatus<'a> {
+    NotMatched,
+    /// Default atlas without the field — fine.
+    OptionalMissing,
+    /// Experimental matched function without provenance — not fine.
+    RequiredMissing,
+    Present(&'a MatchProvenance),
+    /// Present but AI record lacks model / reasoning / harness.
+    Incomplete(&'a MatchProvenance),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::MatchProvenance;
+
+    fn sample_fn(matched: bool, prov: Option<MatchProvenance>) -> ChaosFunction {
+        ChaosFunction {
+            id: "arm9:foo".into(),
+            module: "arm9".into(),
+            name: "foo".into(),
+            addr: 0x200,
+            size: 16,
+            matched,
+            src_path: None,
+            author: None,
+            div: None,
+            cat: None,
+            floor: None,
+            sim: None,
+            sibling: None,
+            match_provenance: prov,
+        }
+    }
 
     #[test]
     fn cycle_and_parse() {
@@ -105,25 +192,92 @@ mod tests {
 
     #[test]
     fn tracking_keys_match_for_both_conventions() {
-        let f = ChaosFunction {
-            id: "arm9:foo".into(),
-            module: "arm9".into(),
-            name: "foo".into(),
-            addr: 0x200,
-            size: 16,
-            matched: false,
-            src_path: None,
-            author: None,
-            div: None,
-            cat: None,
-            floor: None,
-            sim: None,
-            sibling: None,
-        };
+        let f = sample_fn(false, None);
         assert_eq!(
             Tracking::function_key(Convention::Default, &f),
             Tracking::function_key(Convention::Experimental, &f)
         );
         assert!(Tracking::same_function(Convention::Default, &f, &f));
+    }
+
+    #[test]
+    fn experimental_requires_complete_provenance_on_matched() {
+        let bare = sample_fn(true, None);
+        assert!(matches!(
+            Tracking::provenance_status(Convention::Experimental, &bare),
+            ProvenanceStatus::RequiredMissing
+        ));
+        assert!(matches!(
+            Tracking::provenance_status(Convention::Default, &bare),
+            ProvenanceStatus::OptionalMissing
+        ));
+
+        let human = sample_fn(
+            true,
+            Some(MatchProvenance::Human {
+                by: Some("lunavyqo".into()),
+                note: None,
+            }),
+        );
+        assert!(matches!(
+            Tracking::provenance_status(Convention::Experimental, &human),
+            ProvenanceStatus::Present(_)
+        ));
+
+        let partial_ai = sample_fn(
+            true,
+            Some(MatchProvenance::Ai {
+                model: "gpt-5".into(),
+                reasoning: None,
+                harness: Some("fanout".into()),
+                by: None,
+            }),
+        );
+        assert!(matches!(
+            Tracking::provenance_status(Convention::Experimental, &partial_ai),
+            ProvenanceStatus::Incomplete(_)
+        ));
+
+        let full_ai = sample_fn(
+            true,
+            Some(MatchProvenance::Ai {
+                model: "gpt-5".into(),
+                reasoning: Some("high".into()),
+                harness: Some("fanout-v3".into()),
+                by: Some("me".into()),
+            }),
+        );
+        assert!(matches!(
+            Tracking::provenance_status(Convention::Experimental, &full_ai),
+            ProvenanceStatus::Present(_)
+        ));
+        let lines = Tracking::provenance_detail_lines(Convention::Experimental, &full_ai);
+        assert!(lines[0].contains("model=gpt-5"));
+        assert!(lines[0].contains("reasoning=high"));
+        assert!(lines[0].contains("harness=fanout-v3"));
+    }
+
+    #[test]
+    fn match_provenance_serde_roundtrip() {
+        let ai = MatchProvenance::Ai {
+            model: "claude-opus".into(),
+            reasoning: Some("high".into()),
+            harness: Some("batch".into()),
+            by: None,
+        };
+        let v = serde_json::to_value(&ai).unwrap();
+        assert_eq!(v["kind"], "ai");
+        assert_eq!(v["model"], "claude-opus");
+        let back: MatchProvenance = serde_json::from_value(v).unwrap();
+        assert_eq!(back, ai);
+
+        let human = MatchProvenance::Human {
+            by: Some("alice".into()),
+            note: None,
+        };
+        let v = serde_json::to_value(&human).unwrap();
+        assert_eq!(v["kind"], "human");
+        let back: MatchProvenance = serde_json::from_value(v).unwrap();
+        assert_eq!(back, human);
     }
 }

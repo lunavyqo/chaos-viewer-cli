@@ -711,6 +711,7 @@ mod tests {
             floor: None,
             sim: None,
             sibling: None,
+            match_provenance: None,
         }];
         let claims = vec![Claim {
             id: None,
