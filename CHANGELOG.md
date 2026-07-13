@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Overview **module sort** (`s`): cycle name → worst (fewest matched) → best
-  (most matched) → most functions → most bytes. Best/worst use absolute matched
-  function **counts**, not percentages (differs from chaos-viewer’s % sort).
+- Overview **module sort** (`s`): cycle name → worst (most unmatched left) →
+  best (fewest unmatched left) → most functions → most bytes. Best/worst use
+  remaining open function **counts**, not match percentages.
 
 ### Fixed
 

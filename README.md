@@ -18,7 +18,7 @@ Private early development. Binary name: `chaos`.
   locations as the web viewer); **multiple saved projects** with switch / resume
 - Overview: modules + functions on top, **detail pane** underneath; **`m`**
   filters all / unmatched only / matched only; **`s`** sorts modules (name,
-  best/worst by matched count, most functions, most bytes)
+  worst/best by unmatched left, most functions, most bytes)
 - **Heatmap** tab: view-only squarified byte treemap (same layout math as
   chaos-viewer) — green matched / grey unmatched / yellow claimed
 - Priority lists: nearly done, best scaffolded, biggest unmatched
