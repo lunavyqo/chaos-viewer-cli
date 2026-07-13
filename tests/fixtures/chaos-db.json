@@ -25,7 +25,13 @@
       "addr": 33554432,
       "size": 100,
       "matched": true,
-      "author": "alice"
+      "author": "alice",
+      "matchProvenance": {
+        "kind": "ai",
+        "model": "fixture-model",
+        "reasoning": "high",
+        "harness": "fixture-harness"
+      }
     },
     {
       "id": "arm9:0x02000100",

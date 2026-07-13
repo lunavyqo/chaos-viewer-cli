@@ -1240,6 +1240,10 @@ Press ? or esc to close help."#
         if let Some(a) = &fn_.author {
             lines.push(format!("author: {a}"));
         }
+        // Experimental: show how this function was matched (model/harness or human).
+        for line in crate::conventions::Tracking::provenance_detail_lines(self.convention, fn_) {
+            lines.push(line);
+        }
         if let Some(det) = &self.detail {
             if let Some(c) = &det.callees {
                 lines.push(format!("callees: {}", c.join(", ")));

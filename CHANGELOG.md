@@ -9,11 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Experimental match provenance**: under the experimental convention, every
+  matched function should record `matchProvenance` — either `human` or `ai`
+  with **model**, **reasoning** level, and **harness**. Shown on the Overview
+  detail pane; incomplete/missing records are flagged. Default / sm64ds atlases
+  omit the field and stay unchanged. See `docs/schema.md`.
 - **Per-project conventions** (`default` | `experimental`): set on the Projects
   hub with **`v`**, or via `chaos projects add … --convention` /
   `chaos projects convention <id> <name>`. Default is current sm64ds-compatible
-  tracking; experimental is identical for now and is the only place future
-  tracking changes will land. Stored in `projects.toml`.
+  tracking; experimental is where tracking experiments land. Stored in
+  `projects.toml`.
 - **Clear batch** (`Shift+b`): empty the prompt batch in one keypress (same idea
   as chaos-viewer’s clear control). Shown in help, chrome hints, and the detail
   footer when the batch is non-empty.

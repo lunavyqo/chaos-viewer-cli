@@ -288,6 +288,7 @@ mod tests {
             floor: None,
             sim: Some(0.87),
             sibling: Some("func_scaffold".into()),
+            match_provenance: None,
         }
     }
 

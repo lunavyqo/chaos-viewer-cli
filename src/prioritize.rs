@@ -108,6 +108,7 @@ mod tests {
             floor: floor.map(str::to_string),
             sim,
             sibling: None,
+            match_provenance: None,
         }
     }
 

@@ -26,10 +26,22 @@ Per-project switch for how this CLI tracks / interprets atlas data:
 
 | Convention | Meaning |
 |---|---|
-| **default** | Current chaos-viewer / sm64ds-compatible behavior (the only mode before this feature). Keep sm64ds (and other upstream-shaped repos) on this. |
-| **experimental** | Opt-in fork for alternate tracking. **Behaves identically to default for now.** Future tracking experiments apply only to experimental profiles so default work (e.g. sm64ds) stays stable. |
+| **default** | Current chaos-viewer / sm64ds-compatible behavior. Keep sm64ds (and other upstream-shaped repos) on this. |
+| **experimental** | Opt-in fork for alternate tracking. Divergences from default are listed below; future tracking experiments apply only here so default work stays stable. |
 
 Missing `convention` keys in older `projects.toml` files load as **default**.
+
+### Experimental divergences (so far)
+
+1. **Match provenance (required on matched functions)**  
+   Each matched function in the atlas should include `matchProvenance`:
+   - **human** — person matched it (`by` optional)
+   - **ai** — keep **model**, **reasoning** level, and **harness** that produced the match  
+
+   Generators for experimental repos must write this when banking a match. The
+   TUI detail pane shows `matched via: …` and warns if a matched function is
+   missing or incomplete under an experimental profile. Default profiles never
+   require the field (sm64ds atlases stay unchanged).
 
 ## CLI
 
