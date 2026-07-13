@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Overview **module sort** (`s`): cycle name → worst (fewest matched) → best
+  (most matched) → most functions → most bytes. Best/worst use absolute matched
+  function **counts**, not percentages (differs from chaos-viewer’s % sort).
+
 ### Fixed
 
 - Overview **unmatched** filter hides fully matched modules from the module

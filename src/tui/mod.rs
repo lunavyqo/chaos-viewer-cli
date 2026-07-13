@@ -54,6 +54,89 @@ enum MatchFilter {
     MatchedOnly,
 }
 
+/// Module list sort (parity with chaos-viewer, but best/worst use matched **count** not %).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ModuleSort {
+    #[default]
+    Name,
+    /// Fewest matched functions first (worst).
+    MatchedAsc,
+    /// Most matched functions first (best).
+    MatchedDesc,
+    /// Largest modules by function count.
+    Count,
+    /// Largest modules by byte size.
+    Bytes,
+}
+
+impl ModuleSort {
+    fn cycle(self) -> Self {
+        match self {
+            Self::Name => Self::MatchedAsc,
+            Self::MatchedAsc => Self::MatchedDesc,
+            Self::MatchedDesc => Self::Count,
+            Self::Count => Self::Bytes,
+            Self::Bytes => Self::Name,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Name => "name (a–z)",
+            Self::MatchedAsc => "worst first (fewest matched)",
+            Self::MatchedDesc => "best first (most matched)",
+            Self::Count => "most functions",
+            Self::Bytes => "most bytes",
+        }
+    }
+
+    fn short(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::MatchedAsc => "worst",
+            Self::MatchedDesc => "best",
+            Self::Count => "count",
+            Self::Bytes => "bytes",
+        }
+    }
+}
+
+/// Per-module aggregates used for list filtering and sort.
+#[derive(Debug, Clone, Copy, Default)]
+struct ModuleAgg {
+    matched: usize,
+    total: usize,
+    bytes: u64,
+}
+
+/// Sort module names in place using precomputed aggregates.
+fn sort_modules(mods: &mut [String], stats: &HashMap<String, ModuleAgg>, mode: ModuleSort) {
+    let name_cmp = |a: &String, b: &String| a.cmp(b);
+    match mode {
+        ModuleSort::Name => mods.sort_by(name_cmp),
+        ModuleSort::MatchedAsc => mods.sort_by(|a, b| {
+            let ma = stats.get(a).map(|s| s.matched).unwrap_or(0);
+            let mb = stats.get(b).map(|s| s.matched).unwrap_or(0);
+            ma.cmp(&mb).then_with(|| a.cmp(b))
+        }),
+        ModuleSort::MatchedDesc => mods.sort_by(|a, b| {
+            let ma = stats.get(a).map(|s| s.matched).unwrap_or(0);
+            let mb = stats.get(b).map(|s| s.matched).unwrap_or(0);
+            mb.cmp(&ma).then_with(|| a.cmp(b))
+        }),
+        ModuleSort::Count => mods.sort_by(|a, b| {
+            let ta = stats.get(a).map(|s| s.total).unwrap_or(0);
+            let tb = stats.get(b).map(|s| s.total).unwrap_or(0);
+            tb.cmp(&ta).then_with(|| a.cmp(b))
+        }),
+        ModuleSort::Bytes => mods.sort_by(|a, b| {
+            let ba = stats.get(a).map(|s| s.bytes).unwrap_or(0);
+            let bb = stats.get(b).map(|s| s.bytes).unwrap_or(0);
+            bb.cmp(&ba).then_with(|| a.cmp(b))
+        }),
+    }
+}
+
 impl MatchFilter {
     fn cycle(self) -> Self {
         match self {
@@ -237,6 +320,7 @@ struct App {
     /// `function.id` → index in `db.functions` (avoids O(n) scans on every key).
     id_index: HashMap<String, usize>,
     match_filter: MatchFilter,
+    module_sort: ModuleSort,
     priority_mode: PriorityMode,
     priority_list: Vec<usize>,
     priority_sel: usize,
@@ -312,6 +396,7 @@ impl App {
             fn_offset: 0,
             id_index: HashMap::new(),
             match_filter: MatchFilter::All,
+            module_sort: ModuleSort::Name,
             priority_mode: PriorityMode::Nearly,
             priority_list: Vec::new(),
             priority_sel: 0,
@@ -474,6 +559,10 @@ impl App {
                     action: "match filter",
                 },
                 KeyHint {
+                    key: "s",
+                    action: "module sort",
+                },
+                KeyHint {
                     key: "/",
                     action: "search",
                 },
@@ -552,8 +641,9 @@ GLOBAL
               batched rows show violet [B1] [B2] … badges in lists
 
 OVERVIEW
-  top: modules (h/l) · functions (j/k) · m match filter · / search
-              unmatched filter keeps fully matched modules (done n/n)
+  top: modules (h/l) · functions (j/k) · m match filter · s module sort · / search
+              unmatched filter hides fully matched modules
+              sort: name · worst/best by matched count (not %) · most fns · most bytes
   bottom: detail pane for the selected function (loads as you move)
   pgup/pgdn   scroll the detail pane (j/k still move the function list)
   [ / ]       scroll detail one line
@@ -865,26 +955,30 @@ Press ? or esc to close help."#
 
     fn rebuild_modules(&mut self, db: &ChaosDb) {
         // One linear pass for counts instead of O(modules × functions) every frame.
-        let mut totals: HashMap<String, (usize, usize)> = HashMap::new();
+        let mut totals: HashMap<String, ModuleAgg> = HashMap::new();
         for f in &db.functions {
-            let e = totals.entry(f.module.clone()).or_insert((0, 0));
-            e.1 += 1;
+            let e = totals.entry(f.module.clone()).or_default();
+            e.total += 1;
+            e.bytes = e.bytes.saturating_add(f.size);
             if f.matched {
-                e.0 += 1;
+                e.matched += 1;
             }
         }
         let mut mods: Vec<String> = totals.keys().cloned().collect();
-        mods.sort();
         // Apply match filter to the module list (matched view drops never-touched modules).
         let filter = self.match_filter;
         mods.retain(|m| {
-            let (matched, total) = totals.get(m).copied().unwrap_or((0, 0));
-            filter.keeps_module(matched, total)
+            let s = totals.get(m).copied().unwrap_or_default();
+            filter.keeps_module(s.matched, s.total)
         });
+        sort_modules(&mut mods, &totals, self.module_sort);
         let prev = self.selected_module().map(str::to_string);
         self.module_counts = mods
             .iter()
-            .map(|m| totals.get(m).copied().unwrap_or((0, 0)))
+            .map(|m| {
+                let s = totals.get(m).copied().unwrap_or_default();
+                (s.matched, s.total)
+            })
             .collect();
         self.module_list = mods;
         self.module_sel = prev
@@ -1786,6 +1880,20 @@ Add functions with b on Overview or Priorities \
                     self.fn_list.len()
                 );
             }
+            KeyCode::Char('s') if self.screen == Screen::Overview => {
+                self.module_sort = self.module_sort.cycle();
+                if let Some(db) = self.db.clone() {
+                    self.rebuild_modules(&db);
+                }
+                // Keep the selected module if possible; functions stay for that module.
+                self.rebuild_functions();
+                self.ensure_selected_detail().await;
+                self.status = format!(
+                    "Module sort: {} ({} modules)",
+                    self.module_sort.label(),
+                    self.module_list.len()
+                );
+            }
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1).await,
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1).await,
             KeyCode::Left | KeyCode::Char('h') if self.screen == Screen::Overview => {
@@ -2508,13 +2616,20 @@ Add functions with b on Overview or Priorities \
             })
             .collect();
         let mod_title = match self.match_filter {
-            MatchFilter::MatchedOnly => " Modules  (have matches · h/l) ",
-            MatchFilter::All | MatchFilter::UnmatchedOnly => " Modules  (h/l) ",
+            MatchFilter::MatchedOnly => {
+                format!(
+                    " Modules  (matches · {} · s/h/l) ",
+                    self.module_sort.short()
+                )
+            }
+            MatchFilter::All | MatchFilter::UnmatchedOnly => {
+                format!(" Modules  ({} · s/h/l) ", self.module_sort.short())
+            }
         };
         Self::draw_line_list(
             f,
             cols[0],
-            mod_title.into(),
+            mod_title,
             &self.theme,
             &mod_lines,
             self.module_offset,
@@ -3005,4 +3120,68 @@ async fn run_loop(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats(pairs: &[(&str, usize, usize, u64)]) -> HashMap<String, ModuleAgg> {
+        pairs
+            .iter()
+            .map(|(name, matched, total, bytes)| {
+                (
+                    (*name).to_string(),
+                    ModuleAgg {
+                        matched: *matched,
+                        total: *total,
+                        bytes: *bytes,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn module_sort_matched_count_not_percent() {
+        // a: 1/2 = 50%, b: 2/100 = 2% — by percent worst is b; by count worst is a.
+        let st = stats(&[("a", 1, 2, 10), ("b", 2, 100, 20), ("c", 5, 5, 5)]);
+        let mut mods = vec!["a".into(), "b".into(), "c".into()];
+
+        sort_modules(&mut mods, &st, ModuleSort::MatchedAsc);
+        assert_eq!(mods, vec!["a", "b", "c"]); // 1, 2, 5 matched
+
+        sort_modules(&mut mods, &st, ModuleSort::MatchedDesc);
+        assert_eq!(mods, vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn module_sort_name_count_bytes() {
+        let st = stats(&[("mid", 1, 10, 50), ("big", 1, 30, 10), ("tiny", 1, 2, 100)]);
+        let mut mods = vec!["mid".into(), "big".into(), "tiny".into()];
+
+        sort_modules(&mut mods, &st, ModuleSort::Name);
+        assert_eq!(mods, vec!["big", "mid", "tiny"]);
+
+        sort_modules(&mut mods, &st, ModuleSort::Count);
+        assert_eq!(mods, vec!["big", "mid", "tiny"]); // 30, 10, 2
+
+        sort_modules(&mut mods, &st, ModuleSort::Bytes);
+        assert_eq!(mods, vec!["tiny", "mid", "big"]); // 100, 50, 10
+    }
+
+    #[test]
+    fn module_sort_cycles() {
+        let mut m = ModuleSort::Name;
+        for expected in [
+            ModuleSort::MatchedAsc,
+            ModuleSort::MatchedDesc,
+            ModuleSort::Count,
+            ModuleSort::Bytes,
+            ModuleSort::Name,
+        ] {
+            m = m.cycle();
+            assert_eq!(m, expected);
+        }
+    }
 }
