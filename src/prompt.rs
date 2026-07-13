@@ -118,10 +118,21 @@ Same field as contributor colors."
         r#"
 
 ======================================================================
-EXPERIMENTAL — WHO vs HOW (do not mix these)
+EXPERIMENTAL — WHO vs HOW vs EVERY TRY
 ======================================================================
 WHO (credit, contributor colors) → function field `author` (GitHub login)
-HOW  (match method)              → `matchProvenance` only
+HOW  (final method when banked)  → `matchProvenance` only
+EVERY TRY (including dead ends)  → log a MATCH_RESULT every iteration
+
+You MUST emit a MATCH_RESULT for **each function in this batch on every
+attempt**, even when:
+  - nothing improved
+  - near-miss did not beat the previous best
+  - compile failed
+  - you gave up / skipped
+
+status values:
+  matched | near_miss | no_progress | compile_error | failed | skipped
 
 matchProvenance answers HOW only:
   kind=ai    → model + reasoning + harness (slug tokens, no spaces)
@@ -135,8 +146,9 @@ TOKEN RULES for matchProvenance (ai):
   - reasoning: high | medium | low | none | …
   Do NOT put the operator name in matchProvenance (no `by` field).
 
-Do NOT invent a match. VERIFY until MATCH. Emit MATCH_RESULT for each function.
-Do NOT put secrets or chain-of-thought dumps into provenance.
+Do NOT invent a match. VERIFY until MATCH.
+Do NOT omit MATCH_RESULT because the try was "useless" — useless tries are data.
+Do NOT put secrets or full chain-of-thought dumps into the log.
 "#,
         author_line = author_line,
     ));
@@ -151,7 +163,8 @@ fn prompt_provenance_block(fn_: &ChaosFunction, author: &str) -> String {
     };
     format!(
         r#"----------------------------------------------------------------------
-MATCH_RESULT template for {name} (fill in your FINAL reply; one block per function)
+MATCH_RESULT — emit ONE of these per function for THIS iteration
+(even if status=no_progress / compile_error / failed)
 
 ```yaml
 MATCH_RESULT:
@@ -159,16 +172,21 @@ MATCH_RESULT:
   module: {module}
   addr: "0x{addr:x}"
   size: {size}
-  status: matched   # matched | near_miss | failed
-  # WHO (classic chaos-viewer credit — contributor colors):
+  status: no_progress   # matched | near_miss | no_progress | compile_error | failed | skipped
+  # WHO (classic credit — only required when status=matched; still preferred always):
   author: "{author}"            {author_comment}
-  # HOW (experimental method only — no operator name here):
+  # HOW this try was run (required for kind=ai on every attempt):
   matchProvenance:
     kind: ai                    # ai | human
     model: "grok-4.5"           # slug; NOT "Grok 4.5"
     reasoning: "high"
     harness: "grok-build"       # slug; NOT "Grok Build"
-  # If near_miss:
+  # Score this try when known (still log if null / no improvement):
+  divergences: null             # int instruction divergence, or null if un scored
+  prevBestDivergences: null     # best known before this try, if any
+  improvedNearMiss: false       # true only if divergences < prevBestDivergences
+  note: ""                      # short note optional; not a CoT dump
+  # If near_miss and you have a draft (path or inline for the operator):
   # nearMiss:
   #   divergences: <int>
   #   c_source: |
@@ -192,13 +210,13 @@ fn prompt_footer_experimental(
 ) -> String {
     let mut lines = prompt_footer(project, n, opts);
     let author_rule = if author == "YOUR_GITHUB_LOGIN" {
-        "   - author → REQUIRED: operator GitHub login on MATCH_RESULT.author \
-(classic credit field).\n     Replace YOUR_GITHUB_LOGIN. Not inside matchProvenance."
+        "   - author → on MATCH_RESULT.author (classic credit). Required when matched.\n\
+             Replace YOUR_GITHUB_LOGIN. Not inside matchProvenance."
             .to_string()
     } else {
         format!(
-            "   - author → REQUIRED: use \"{author}\" on MATCH_RESULT.author \
-(classic credit).\n     Do not put this inside matchProvenance."
+            "   - author → use \"{author}\" on MATCH_RESULT.author when known/matched.\n\
+             Not inside matchProvenance."
         )
     };
     lines.push_str(&format!(
@@ -207,16 +225,20 @@ fn prompt_footer_experimental(
 ======================================================================
 EXPERIMENTAL — BEFORE YOU FINISH
 ======================================================================
-1. For EACH function, emit a filled MATCH_RESULT YAML block.
-2. If status=matched (verify says MATCH):
-   - matchProvenance kind=ai → model + reasoning + harness (slug tokens only)
+1. For EACH function, emit a filled MATCH_RESULT for **this iteration**.
+2. status must reflect reality (prefer no_progress over silence).
+3. If status=matched (verify says MATCH):
+   - matchProvenance kind=ai → model + reasoning + harness (slug tokens)
    - matchProvenance kind=human → no model fields; optional note only
 {author_rule}
-3. If near_miss: still emit MATCH_RESULT + nearMiss draft when possible.
-4. Bank/atlas: author → function.author; matchProvenance → how it was matched.
-5. Open a PR when matched; PR author should match `author`.
+4. If near_miss: include divergences (+ draft when available). Still log if
+   it did NOT beat prevBestDivergences (improvedNearMiss: false).
+5. Operators append every MATCH_RESULT into config/match_attempts.jsonl
+   (tools/log_attempt.py). Bank success also writes the final how-record.
+6. Open a PR when matched; PR author should match `author`.
 
 Refuse to claim "matched" without verify succeeding.
+Never skip logging a failed/empty try.
 "#,
         author_rule = author_rule,
     ));
@@ -467,14 +489,16 @@ mod tests {
         let project = sample_project();
         let fn_ = sample_fn();
         let text = build_experimental_prompt(&project, &[(fn_, None)], &PromptOptions::default());
-        assert!(text.contains("WHO vs HOW"));
+        assert!(text.contains("WHO vs HOW vs EVERY TRY"));
         assert!(text.contains("MATCH_RESULT"));
         assert!(text.contains("matchProvenance"));
+        assert!(text.contains("no_progress"));
         assert!(text.contains("func_020009e0"));
         assert!(text.contains("model:"));
         assert!(text.contains("reasoning:"));
         assert!(text.contains("harness:"));
         assert!(text.contains("BEFORE YOU FINISH"));
+        assert!(text.contains("improvedNearMiss"));
         // Credit uses classic author field, not provenance.by
         assert!(text.contains("author:"));
         assert!(text.contains("YOUR_GITHUB_LOGIN") || text.contains("GitHub"));
