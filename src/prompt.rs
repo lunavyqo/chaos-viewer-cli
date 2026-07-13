@@ -68,27 +68,24 @@ pub fn build_experimental_prompt(
     } else {
         functions.len()
     };
-    let handle = operator_github_handle(opts);
+    let author = operator_github_handle(opts);
     let mut parts: Vec<String> = Vec::new();
-    parts.push(prompt_header_experimental(project, n, &handle));
+    parts.push(prompt_header_experimental(project, n, &author));
     for (fn_, det) in functions {
         parts.push(prompt_section(project, fn_, det.as_ref()));
-        parts.push(prompt_provenance_block(fn_, &handle));
+        parts.push(prompt_provenance_block(fn_, &author));
     }
-    parts.push(prompt_footer_experimental(project, n, opts, &handle));
+    parts.push(prompt_footer_experimental(project, n, opts, &author));
     parts.join("\n\n")
 }
 
-/// Operator GitHub login for provenance `by` (same idea as claims `handle`).
+/// Operator GitHub login for the classic **`author`** credit field.
 ///
-/// Order: claims session handle → `CHAOS_CLAIMS_HANDLE` → `CHAOS_GITHUB_HANDLE`
-/// → placeholder the model must replace.
+/// Same sources as claims handle. Not stored inside matchProvenance (that is
+/// “how” only).
 fn operator_github_handle(opts: &PromptOptions) -> String {
     if let Some(s) = &opts.claims_session {
         let h = s.handle.trim();
-        if !h.is_empty() && h != "chaos-viewer-user" {
-            return h.to_string();
-        }
         if !h.is_empty() {
             return h.to_string();
         }
@@ -104,73 +101,57 @@ fn operator_github_handle(opts: &PromptOptions) -> String {
     "YOUR_GITHUB_LOGIN".into()
 }
 
-fn prompt_header_experimental(project: &ProjectConfig, n: usize, handle: &str) -> String {
+fn prompt_header_experimental(project: &ProjectConfig, n: usize, author: &str) -> String {
     let mut base = prompt_header(project, n);
-    let by_line = if handle == "YOUR_GITHUB_LOGIN" {
-        "  by         = REQUIRED — the operator's GitHub username (login), \
-not the model name.\n               Replace YOUR_GITHUB_LOGIN with the real login \
-(same handle used for claims / PRs)."
+    let author_line = if author == "YOUR_GITHUB_LOGIN" {
+        "  author     = REQUIRED credit field: operator GitHub login (same as classic \
+chaos-viewer).\n               Put it on MATCH_RESULT.author — NOT inside matchProvenance."
             .to_string()
     } else {
         format!(
-            "  by         = REQUIRED — already set to the operator GitHub login \
-\"{handle}\".\n               Copy it into every MATCH_RESULT. Do not invent another \
-name; do not put the model id here."
+            "  author     = REQUIRED credit: already set to \"{author}\" (GitHub login).\n\
+               Put this on MATCH_RESULT.author — NOT inside matchProvenance. \
+Same field as contributor colors."
         )
     };
     base.push_str(&format!(
         r#"
 
 ======================================================================
-EXPERIMENTAL CONVENTION — MATCH PROVENANCE (MANDATORY)
+EXPERIMENTAL — WHO vs HOW (do not mix these)
 ======================================================================
-This project tracks HOW each function was matched. You MUST report provenance
-for every function in this batch. Incomplete AI provenance is a failed task.
+WHO (credit, contributor colors) → function field `author` (GitHub login)
+HOW  (match method)              → `matchProvenance` only
 
-When you are an AI agent matching code:
-  kind       = ai
-  model      = machine token for the model (NO SPACES; slug form)
-  reasoning  = effort/reasoning level token (high|medium|low|none|…)
-  harness    = tool/pipeline token (NO SPACES; lowercase preferred)
-{by_line}
+matchProvenance answers HOW only:
+  kind=ai    → model + reasoning + harness (slug tokens, no spaces)
+  kind=human → human match (optional note); credit still goes in `author`
 
-TOKEN RULES (validators often reject display names):
-  - model:   letters, digits, . _ + / - only; start alphanumeric; max ~128
-             GOOD: grok-4.5  claude-opus-4  gpt-5.2
-             BAD:  "Grok 4.5"  "Claude Opus 4"  (spaces break banking tools)
-  - harness: lowercase letters, digits, . _ / - ; start [a-z0-9]; max ~64
-             GOOD: grok-build  cursor-agent  claude-code  fanout-v3
-             BAD:  "Grok Build"  "Cursor Agent"
-  - reasoning: same spirit as harness (high, medium, low, none, xhigh, …)
-  If your UI shows a pretty name, slugify it (spaces→-, lower for harness).
+{author_line}
 
-When a human matched without AI:
-  kind = human
-  by   = REQUIRED — that person's GitHub login (same rule as above)
+TOKEN RULES for matchProvenance (ai):
+  - model:   GOOD: grok-4.5  claude-opus-4   BAD: "Grok 4.5"
+  - harness: GOOD: grok-build  cursor-agent  BAD: "Grok Build"
+  - reasoning: high | medium | low | none | …
+  Do NOT put the operator name in matchProvenance (no `by` field).
 
-IMPORTANT: `by` is always the **human operator / contributor GitHub username**,
-never the model name. Claims use the same handle field; keep them consistent.
-
-Do NOT invent a match. VERIFY with the command below until it reports MATCH.
-Do NOT skip the MATCH_RESULT block(s) at the end of your reply.
-Do NOT put secrets, API keys, or full chain-of-thought dumps into provenance —
-only model, reasoning, harness tokens, and the operator `by` handle.
+Do NOT invent a match. VERIFY until MATCH. Emit MATCH_RESULT for each function.
+Do NOT put secrets or chain-of-thought dumps into provenance.
 "#,
-        by_line = by_line,
+        author_line = author_line,
     ));
     base
 }
 
-fn prompt_provenance_block(fn_: &ChaosFunction, handle: &str) -> String {
-    let by_comment = if handle == "YOUR_GITHUB_LOGIN" {
-        "# REQUIRED: operator GitHub login (not the model). Replace this placeholder."
+fn prompt_provenance_block(fn_: &ChaosFunction, author: &str) -> String {
+    let author_comment = if author == "YOUR_GITHUB_LOGIN" {
+        "# REQUIRED GitHub login for credit (classic author field). Replace placeholder."
     } else {
-        "# REQUIRED: operator GitHub login — keep this value (from claims / env)."
+        "# REQUIRED GitHub login for credit — keep this value (claims / env)."
     };
     format!(
         r#"----------------------------------------------------------------------
-MATCH_RESULT template for {name} (fill this in your FINAL reply; copy one
-block per function; leave status=near_miss|failed if not matched yet)
+MATCH_RESULT template for {name} (fill in your FINAL reply; one block per function)
 
 ```yaml
 MATCH_RESULT:
@@ -179,15 +160,15 @@ MATCH_RESULT:
   addr: "0x{addr:x}"
   size: {size}
   status: matched   # matched | near_miss | failed
-  # If status=matched, provenance is REQUIRED:
+  # WHO (classic chaos-viewer credit — contributor colors):
+  author: "{author}"            {author_comment}
+  # HOW (experimental method only — no operator name here):
   matchProvenance:
-    kind: ai        # ai | human
-    # Use SLUG tokens (no spaces). Examples:
-    model: "grok-4.5"           # NOT "Grok 4.5"
+    kind: ai                    # ai | human
+    model: "grok-4.5"           # slug; NOT "Grok 4.5"
     reasoning: "high"
-    harness: "grok-build"       # NOT "Grok Build"
-    by: "{handle}"              {by_comment}
-  # If near_miss: include draft C and estimated instruction divergence:
+    harness: "grok-build"       # slug; NOT "Grok Build"
+  # If near_miss:
   # nearMiss:
   #   divergences: <int>
   #   c_source: |
@@ -198,8 +179,8 @@ MATCH_RESULT:
         module = fn_.module,
         addr = fn_.addr,
         size = fn_.size,
-        handle = handle,
-        by_comment = by_comment,
+        author = author,
+        author_comment = author_comment,
     )
 }
 
@@ -207,18 +188,17 @@ fn prompt_footer_experimental(
     project: &ProjectConfig,
     n: usize,
     opts: &PromptOptions,
-    handle: &str,
+    author: &str,
 ) -> String {
-    // Start from default footer, then append experimental banking rules.
     let mut lines = prompt_footer(project, n, opts);
-    let by_rule = if handle == "YOUR_GITHUB_LOGIN" {
-        "   - by  → REQUIRED on every matched result: the operator's **GitHub username**\n\
-             (login). Replace YOUR_GITHUB_LOGIN. Same handle as claims. Not the model id."
+    let author_rule = if author == "YOUR_GITHUB_LOGIN" {
+        "   - author → REQUIRED: operator GitHub login on MATCH_RESULT.author \
+(classic credit field).\n     Replace YOUR_GITHUB_LOGIN. Not inside matchProvenance."
             .to_string()
     } else {
         format!(
-            "   - by  → REQUIRED: use \"{handle}\" (operator GitHub login) on every matched\n\
-             MATCH_RESULT. Same handle as claims. Do not substitute the model name."
+            "   - author → REQUIRED: use \"{author}\" on MATCH_RESULT.author \
+(classic credit).\n     Do not put this inside matchProvenance."
         )
     };
     lines.push_str(&format!(
@@ -227,22 +207,18 @@ fn prompt_footer_experimental(
 ======================================================================
 EXPERIMENTAL — BEFORE YOU FINISH
 ======================================================================
-1. For EACH function above, emit a filled MATCH_RESULT YAML block (see template).
+1. For EACH function, emit a filled MATCH_RESULT YAML block.
 2. If status=matched (verify says MATCH):
-   - kind=ai  → model + reasoning + harness MUST be non-empty SLUG tokens
-     (no spaces; see TOKEN RULES). Not placeholders; not display names.
-   - kind=human → only when no model was used.
-{by_rule}
-3. If status=near_miss: still emit MATCH_RESULT with nearMiss draft so the
-   operator can ingest it; provenance on near-miss is optional but helpful.
-4. Atlas / ledger operators will store matchProvenance on the matched function
-   in chaos-db.json. Your MATCH_RESULT is the source of truth for that record.
-5. Opening a PR is still required when matched (see above); mention model +
-   harness briefly in the PR body; PR author should be the same GitHub user as `by`.
+   - matchProvenance kind=ai → model + reasoning + harness (slug tokens only)
+   - matchProvenance kind=human → no model fields; optional note only
+{author_rule}
+3. If near_miss: still emit MATCH_RESULT + nearMiss draft when possible.
+4. Bank/atlas: author → function.author; matchProvenance → how it was matched.
+5. Open a PR when matched; PR author should match `author`.
 
-Refuse to claim "matched" without the verify command succeeding.
+Refuse to claim "matched" without verify succeeding.
 "#,
-        by_rule = by_rule,
+        author_rule = author_rule,
     ));
     lines
 }
@@ -491,7 +467,7 @@ mod tests {
         let project = sample_project();
         let fn_ = sample_fn();
         let text = build_experimental_prompt(&project, &[(fn_, None)], &PromptOptions::default());
-        assert!(text.contains("EXPERIMENTAL CONVENTION"));
+        assert!(text.contains("WHO vs HOW"));
         assert!(text.contains("MATCH_RESULT"));
         assert!(text.contains("matchProvenance"));
         assert!(text.contains("func_020009e0"));
@@ -499,17 +475,16 @@ mod tests {
         assert!(text.contains("reasoning:"));
         assert!(text.contains("harness:"));
         assert!(text.contains("BEFORE YOU FINISH"));
-        // by is required and is the operator GitHub login (placeholder when unset)
-        assert!(text.contains("by:"));
+        // Credit uses classic author field, not provenance.by
+        assert!(text.contains("author:"));
         assert!(text.contains("YOUR_GITHUB_LOGIN") || text.contains("GitHub"));
-        assert!(text.contains("operator"));
-        // Still includes core match task bits
+        assert!(!text.contains("by: \""));
         assert!(text.contains("byte-for-byte"));
         assert!(text.contains("VERIFY"));
     }
 
     #[test]
-    fn experimental_prompt_prefill_by_from_claims_handle() {
+    fn experimental_prompt_prefill_author_from_claims_handle() {
         let project = sample_project();
         let fn_ = sample_fn();
         let opts = PromptOptions {
@@ -519,9 +494,10 @@ mod tests {
             }),
         };
         let text = build_experimental_prompt(&project, &[(fn_, None)], &opts);
-        assert!(text.contains("by: \"lunavyqo\""));
-        assert!(text.contains("operator GitHub login"));
+        assert!(text.contains("author: \"lunavyqo\""));
         assert!(!text.contains("YOUR_GITHUB_LOGIN"));
+        // method block has no by:
+        assert!(!text.contains("\n    by:"));
     }
 
     #[test]

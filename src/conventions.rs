@@ -215,7 +215,7 @@ mod tests {
         let human = sample_fn(
             true,
             Some(MatchProvenance::Human {
-                by: Some("lunavyqo".into()),
+                by: None,
                 note: None,
             }),
         );
@@ -244,7 +244,7 @@ mod tests {
                 model: "gpt-5".into(),
                 reasoning: Some("high".into()),
                 harness: Some("fanout-v3".into()),
-                by: Some("me".into()),
+                by: None,
             }),
         );
         assert!(matches!(
@@ -255,6 +255,7 @@ mod tests {
         assert!(lines[0].contains("model=gpt-5"));
         assert!(lines[0].contains("reasoning=high"));
         assert!(lines[0].contains("harness=fanout-v3"));
+        assert!(!lines[0].contains("by="));
     }
 
     #[test]

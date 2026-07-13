@@ -33,21 +33,16 @@ Missing `convention` keys in older `projects.toml` files load as **default**.
 
 ### Experimental divergences (so far)
 
-1. **Match provenance (required on matched functions)**  
-   Each matched function in the atlas should include `matchProvenance`:
-   - **human** — person matched it (`by` optional)
-   - **ai** — keep **model**, **reasoning** level, and **harness** that produced the match  
+1. **Match method + classic author**  
+   - **`author`** — who matched (GitHub login); same as default / chaos-viewer  
+   - **`matchProvenance`** — how: `human` or `ai` with **model / reasoning / harness**  
 
-   Generators for experimental repos must write this when banking a match. The
-   TUI detail pane shows `matched via: …` and warns if a matched function is
-   missing or incomplete under an experimental profile. Default profiles never
-   require the field (sm64ds atlases stay unchanged).
+   Experimental requires complete `matchProvenance` on matched functions; credit
+   still uses `author` only. Default profiles never require provenance.
 
 2. **Stock prompt `chaos-experimental`**  
-   Built-in Prompt template that tells the model to emit a `MATCH_RESULT` block
-   per function with filled `matchProvenance`. Auto-selected when you load an
-   experimental profile (if you were still on `chaos-viewer`). Press **`t`** on
-   the Prompt page to cycle templates.
+   Emits `MATCH_RESULT` with `author` (credit) + `matchProvenance` (method).
+   Auto-selected when loading an experimental profile from `chaos-viewer`.
 
 ## CLI
 

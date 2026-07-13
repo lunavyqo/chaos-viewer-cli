@@ -9,9 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Experimental prompt: require operator GitHub login in provenance **`by`**
-  (prefilled from claims handle / `CHAOS_CLAIMS_HANDLE` / `CHAOS_GITHUB_HANDLE`
-  when set — same idea as the claims footer). Models were omitting it.
+- Experimental tracking: **who = `author` only** (classic chaos-viewer credit);
+  **`matchProvenance` = how only** (ai model/reasoning/harness or human). Dropped
+  requiring operator name inside provenance (`by` still deserializes for old
+  data, ignored for credit). Prompt prefills `author` from claims handle / env.
 - Experimental prompt / schema docs: require **slug tokens** for model and
   harness (e.g. `grok-4.5`, `grok-build`) — display names with spaces break
   common bank/provenance validators.
@@ -23,10 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provenance. Auto-selected when loading an experimental project from the
   default `chaos-viewer` template. Cycle with **`t`** on Prompt.
 - **Experimental match provenance**: under the experimental convention, every
-  matched function should record `matchProvenance` — either `human` or `ai`
-  with **model**, **reasoning** level, and **harness**. Shown on the Overview
-  detail pane; incomplete/missing records are flagged. Default / sm64ds atlases
-  omit the field and stay unchanged. See `docs/schema.md`.
+  matched function should record **how** via `matchProvenance` (`human` or
+  `ai` + model/reasoning/harness). **Who** stays on classic `author`. See
+  `docs/schema.md`.
 - **Per-project conventions** (`default` | `experimental`): set on the Projects
   hub with **`v`**, or via `chaos projects add … --convention` /
   `chaos projects convention <id> <name>`. Default is current sm64ds-compatible
