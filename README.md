@@ -16,6 +16,7 @@ Private early development. Binary name: `chaos`.
 
 - Load atlas data from a local path, raw JSON URL, or GitHub repo (probes the same
   locations as the web viewer); **multiple saved projects** with switch / resume
+  and per-project **conventions** (`default` vs `experimental` tracking)
 - Overview: modules + functions on top, **detail pane** underneath; **`m`**
   filters all / unmatched only / matched only; **`s`** sorts modules (name,
   worst/best by unmatched left, most functions, most bytes)

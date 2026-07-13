@@ -21,6 +21,7 @@ use reqwest::Client;
 
 use crate::claims::{load_claims, merge_locked_map, ClaimsSession};
 use crate::clipboard::copy_text;
+use crate::conventions::Convention;
 use crate::discover::sources_equivalent;
 use crate::load::{
     details_base_from_source, load_chaos_db, load_function_detail, DataSource, DetailCache,
@@ -299,6 +300,8 @@ struct App {
     project_id_input: String,
     /// Pending delete: project id awaiting y/n confirmation.
     pending_delete_id: Option<String>,
+    /// Active data-tracking convention (from loaded project, else Default).
+    convention: Convention,
     status: String,
     error: Option<String>,
     db: Option<ChaosDb>,
@@ -364,6 +367,12 @@ impl App {
             .as_ref()
             .and_then(|id| project_store.index_of(id))
             .unwrap_or(0);
+        let initial_convention = project_store
+            .active_id
+            .as_ref()
+            .and_then(|id| project_store.get(id))
+            .map(|p| p.convention)
+            .unwrap_or_default();
         let mut app = Self {
             theme: Theme::default(),
             screen: Screen::Setup,
@@ -376,8 +385,10 @@ impl App {
             saving_project: false,
             project_id_input: String::new(),
             pending_delete_id: None,
-            status: "Project list · j/k enter · Tab or type for URL · Shift+s save · d delete"
-                .into(),
+            convention: initial_convention,
+            status:
+                "Project list · j/k enter · v convention · Tab/type URL · Shift+s save · d delete"
+                    .into(),
             error: None,
             db: None,
             source: None,
@@ -466,6 +477,10 @@ impl App {
                 KeyHint {
                     key: "enter",
                     action: "load",
+                },
+                KeyHint {
+                    key: "v",
+                    action: "convention",
                 },
                 KeyHint {
                     key: "S-s",
@@ -691,6 +706,9 @@ SETUP / PROJECTS
   Shift+s     save current source as a named project (then type id)
   d           delete selected project (asks y/n first; list focused)
   p           open this hub from any loaded screen
+  v           cycle data-tracking convention for selected project
+              default = current / sm64ds-compatible · experimental = fork for
+              future tracking experiments (same as default for now)
 
 Press ? or esc to close help."#
             .to_string()
@@ -745,9 +763,11 @@ Press ? or esc to close help."#
             if let Some(i) = self.project_store.index_of(&p.id) {
                 self.project_sel = i;
             }
+            self.convention = p.convention;
         } else {
             // Don't keep showing e.g. electroplankton as active after freeform-loading sm64ds.
             let _ = self.project_store.set_active(None);
+            self.convention = Convention::Default;
         }
     }
 
@@ -765,10 +785,32 @@ Press ? or esc to close help."#
         if let Some(i) = self.project_store.index_of(&profile.id) {
             self.project_sel = i;
         }
+        self.convention = profile.convention;
         self.status = format!(
-            "Loaded project {} ({}) · {}",
-            profile.name, profile.id, profile.source
+            "Loaded project {} ({}) · [{}] · {}",
+            profile.name,
+            profile.id,
+            profile.convention.label(),
+            profile.source
         );
+        Ok(())
+    }
+
+    /// Cycle the selected saved profile's convention and persist it.
+    fn cycle_selected_convention(&mut self) -> Result<()> {
+        let Some(p) = self.project_store.projects.get(self.project_sel).cloned() else {
+            anyhow::bail!("no project selected");
+        };
+        let next = p.convention.cycle();
+        let mut updated = p;
+        let id = updated.id.clone();
+        updated.convention = next;
+        self.project_store.upsert(updated)?;
+        // If this profile is active / currently loaded, keep session in sync.
+        if self.project_store.active_id.as_deref() == Some(id.as_str()) {
+            self.convention = next;
+        }
+        self.status = format!("Project '{id}' convention → {}", next.label());
         Ok(())
     }
 
@@ -802,6 +844,8 @@ Press ? or esc to close help."#
             name,
             source: source.clone(),
             branch: None,
+            // New saves keep the session convention (default unless cycling first).
+            convention: self.convention,
         })?;
         self.project_store.set_active(Some(&id))?;
         self.project_sel = self.project_store.index_of(&id).unwrap_or(0);
@@ -814,8 +858,12 @@ Press ? or esc to close help."#
             .active_id
             .as_ref()
             .and_then(|id| self.project_store.get(id))
-            .map(|p| format!("{} ({})", p.name, p.id))
-            .or_else(|| self.source.as_ref().map(|s| s.display()))
+            .map(|p| format!("{} ({}) [{}]", p.name, p.id, p.convention.label()))
+            .or_else(|| {
+                self.source
+                    .as_ref()
+                    .map(|s| format!("{} [{}]", s.display(), self.convention.label()))
+            })
             .unwrap_or_else(|| "no project".into())
     }
 
@@ -1707,13 +1755,14 @@ Add functions with b on Overview or Priorities \
                         self.status = "Overview".into();
                     } else {
                         self.status =
-                            "type URL · enter load · Tab list · Shift+s save · q quit".into();
+                            "type URL · enter load · Tab list · v convention · Shift+s save · q quit"
+                                .into();
                     }
                 }
                 KeyCode::Tab => {
                     self.setup_list_focus = !self.setup_list_focus;
                     self.status = if self.setup_list_focus {
-                        "Focus: project list (j/k enter · d delete · Shift+s save)"
+                        "Focus: project list (j/k enter · v convention · d delete · Shift+s save)"
                     } else {
                         "Focus: source input (type URL · enter load · Shift+s save)"
                     }
@@ -1732,6 +1781,11 @@ Add functions with b on Overview or Priorities \
                     if !self.project_store.projects.is_empty() {
                         self.project_sel =
                             (self.project_sel + 1) % self.project_store.projects.len();
+                    }
+                }
+                KeyCode::Char('v') if self.setup_list_focus => {
+                    if let Err(e) = self.cycle_selected_convention() {
+                        self.error = Some(format!("{e:#}"));
                     }
                 }
                 KeyCode::Char('d') if self.setup_list_focus => {
@@ -1793,7 +1847,7 @@ Add functions with b on Overview or Priorities \
                         {
                             self.should_quit = true;
                         } else if self.setup_list_focus
-                            && matches!(c, 'j' | 'k' | 'd' | 'J' | 'K' | 'D')
+                            && matches!(c, 'j' | 'k' | 'd' | 'v' | 'J' | 'K' | 'D' | 'V')
                         {
                             // list shortcuts handled above
                         } else {
@@ -1821,7 +1875,7 @@ Add functions with b on Overview or Priorities \
                     }
                 }
                 self.status =
-                    "Project list · j/k enter · Tab or type for URL · Shift+s save · d delete"
+                    "Project list · j/k enter · v convention · Tab/type URL · Shift+s save · d delete"
                         .into();
             }
             KeyCode::Esc => {
@@ -2346,10 +2400,11 @@ Add functions with b on Overview or Priorities \
             };
             // Prefer atlas project name (truth of loaded data); append profile id if set.
             let atlas = db.project_name();
+            let conv = self.convention.label();
             let proj = match self.project_store.active_id.as_deref() {
-                Some(id) if id != atlas => format!("{atlas} [{id}]"),
-                Some(id) => id.to_string(),
-                None => atlas.to_string(),
+                Some(id) if id != atlas => format!("{atlas} [{id}/{conv}]"),
+                Some(id) => format!("{id} [{conv}]"),
+                None => format!("{atlas} [{conv}]"),
             };
             format!(
                 " chaos  ·  {proj}  ·  {}/{} fn ({}%)  ·  {batch_bit}  ·  gen {gen}  ·  p projects",
@@ -2521,7 +2576,7 @@ Add functions with b on Overview or Priorities \
 
         // Project list
         let list_title = if self.setup_list_focus && !self.saving_project {
-            " Saved projects  [focused]  j/k enter d "
+            " Saved projects  [focused]  j/k enter v=convention d "
         } else {
             " Saved projects "
         };
@@ -2549,7 +2604,12 @@ Add functions with b on Overview or Priorities \
                     paint_on(self.theme.text, row_bg)
                 };
                 list_lines.push(Line::from(Span::styled(
-                    format!("{mark}{star}{:<16}  {}", p.id, p.source),
+                    format!(
+                        "{mark}{star}{:<14}  [{:<12}]  {}",
+                        p.id,
+                        p.convention.label(),
+                        p.source
+                    ),
                     style,
                 )));
             }
@@ -2592,7 +2652,7 @@ Add functions with b on Overview or Priorities \
         } else if self.saving_project {
             "Enter id · enter save · esc cancel"
         } else {
-            "j/k list · enter load · Tab or type for URL · Shift+s save · d delete · q quit"
+            "j/k list · enter load · v convention (default|experimental) · Tab/type URL · Shift+s save · d delete · q quit"
         };
         f.render_widget(
             Paragraph::new(help)

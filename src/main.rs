@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use chaos_viewer_cli::claims::{load_claims, merge_locked_map, ClaimsClient, ClaimsSession};
 use chaos_viewer_cli::clipboard::copy_text;
+use chaos_viewer_cli::conventions::Convention;
 use chaos_viewer_cli::load::{
     details_base_from_source, load_chaos_db, load_function_detail, DetailCache,
 };
@@ -114,6 +115,9 @@ enum ProjectsCmd {
         /// Branch for GitHub discovery
         #[arg(long)]
         branch: Option<String>,
+        /// Data-tracking convention: default | experimental
+        #[arg(long, default_value = "default")]
+        convention: String,
         /// Mark as active (resume on next `chaos` launch)
         #[arg(long)]
         use_now: bool,
@@ -122,6 +126,13 @@ enum ProjectsCmd {
     Remove { id: String },
     /// Set active project (loaded by default in the TUI)
     Use { id: String },
+    /// Set a profile's data-tracking convention (default | experimental)
+    Convention {
+        /// Profile id
+        id: String,
+        /// Convention name: default or experimental
+        convention: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -430,7 +441,12 @@ async fn main() -> Result<()> {
                                 .as_ref()
                                 .map(|b| format!("  branch={b}"))
                                 .unwrap_or_default();
-                            println!("{mark} {:<16}  {}{branch}", p.id, p.source);
+                            println!(
+                                "{mark} {:<16}  [{:<12}]  {}{branch}",
+                                p.id,
+                                p.convention.label(),
+                                p.source
+                            );
                             if p.name != p.id {
                                 println!("    name: {}", p.name);
                             }
@@ -445,20 +461,29 @@ async fn main() -> Result<()> {
                     source,
                     name,
                     branch,
+                    convention,
                     use_now,
                 } => {
                     let name = name.unwrap_or_else(|| id.clone());
+                    let convention = Convention::parse(&convention).with_context(|| {
+                        format!("unknown convention '{convention}' (use default or experimental)")
+                    })?;
                     store.upsert(ProjectProfile {
                         id: id.clone(),
                         name,
                         source,
                         branch,
+                        convention,
                     })?;
                     if use_now {
                         store.set_active(Some(&id))?;
                         println!("active → {id}");
                     }
-                    println!("saved {id} → {}", store.path.display());
+                    println!(
+                        "saved {id} [{}] → {}",
+                        convention.label(),
+                        store.path.display()
+                    );
                 }
                 ProjectsCmd::Remove { id } => {
                     if store.remove(&id)? {
@@ -470,6 +495,18 @@ async fn main() -> Result<()> {
                 ProjectsCmd::Use { id } => {
                     store.set_active(Some(&id))?;
                     println!("active_project = {id}");
+                }
+                ProjectsCmd::Convention { id, convention } => {
+                    let convention = Convention::parse(&convention).with_context(|| {
+                        format!("unknown convention '{convention}' (use default or experimental)")
+                    })?;
+                    let mut profile = store
+                        .get(&id)
+                        .cloned()
+                        .with_context(|| format!("unknown project '{id}'"))?;
+                    profile.convention = convention;
+                    store.upsert(profile)?;
+                    println!("{id} convention → {}", convention.label());
                 }
             }
         }

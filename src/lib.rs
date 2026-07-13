@@ -2,6 +2,7 @@
 
 pub mod claims;
 pub mod clipboard;
+pub mod conventions;
 pub mod discover;
 pub mod load;
 pub mod prioritize;
@@ -11,6 +12,8 @@ pub mod schema;
 pub mod templates;
 pub mod treemap;
 pub mod tui;
+
+pub use conventions::{Convention, Tracking};
 
 pub use claims::{
     merge_locked_map, normalize_claims_api_base, parse_claims_md, Claim, ClaimsClient,
