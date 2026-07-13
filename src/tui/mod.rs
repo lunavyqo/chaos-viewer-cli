@@ -23,6 +23,7 @@ use crate::claims::{load_claims, merge_locked_map, ClaimsSession};
 use crate::clipboard::copy_text;
 use crate::conventions::Convention;
 use crate::discover::sources_equivalent;
+use crate::grok_launch::{cwd_from_load_input, GrokLaunch, GrokLaunchMode};
 use crate::load::{
     details_base_from_source, load_chaos_db, load_function_detail, DataSource, DetailCache,
 };
@@ -350,6 +351,8 @@ struct App {
     template_name_input: String,
     /// After leaving the TUI briefly, open this path in $EDITOR / nano.
     pending_edit: Option<std::path::PathBuf>,
+    /// After leaving the TUI briefly, run Grok Build with the batch prompt.
+    pending_grok: Option<GrokLaunch>,
     claims_session: Option<ClaimsSession>,
     show_help: bool,
     should_quit: bool,
@@ -427,6 +430,7 @@ impl App {
             naming_template: false,
             template_name_input: String::new(),
             pending_edit: None,
+            pending_grok: None,
             claims_session,
             show_help: false,
             should_quit: false,
@@ -641,6 +645,10 @@ impl App {
                     action: "copy",
                 },
                 KeyHint {
+                    key: "g",
+                    action: "grok build",
+                },
+                KeyHint {
                     key: "S-b",
                     action: "clear batch",
                 },
@@ -665,6 +673,7 @@ GLOBAL
   u           update progress (re-fetch chaos-db; matches can land mid-session)
   r           refresh claims only
   c           copy batch prompt to clipboard (no-op if batch empty)
+  g           launch Grok Build with the batch prompt (Prompt page; needs `grok`)
   b           add/remove selected function from batch (max 16)
   Shift+b     clear entire batch (unselect all)
               Prompt page uses the batch only (not the Overview cursor)
@@ -698,6 +707,8 @@ PROMPT
   e           edit current user template in $EDITOR / nano
   Shift+t     set current template as default
   c           copy batch prompt
+  g           open Grok Build with this prompt (run headless, or interactive)
+              writes ~/.config/chaos/last-grok-prompt.md · needs `grok` on PATH
   Shift+b     clear entire batch
   experimental projects auto-select chaos-experimental when on chaos-viewer
 
@@ -1606,6 +1617,53 @@ Add functions with b on Overview or Priorities \
         }
     }
 
+    /// Queue a Grok Build launch after this frame (suspend TUI like the editor).
+    fn queue_grok_launch(&mut self) {
+        if self.batch.is_empty() {
+            self.status = "Nothing to send · batch empty (b to add, then g on Prompt)".into();
+            return;
+        }
+        if self.prompt_text.trim().is_empty() {
+            self.status = "Prompt empty · open Prompt (4) first so it can rebuild".into();
+            return;
+        }
+        let cfg = &self.template_store.config;
+        let mode = cfg
+            .grok_mode
+            .as_deref()
+            .and_then(GrokLaunchMode::parse)
+            .unwrap_or_default();
+        let cwd = cwd_from_load_input(
+            self.load_input.as_deref(),
+            self.source.as_ref().and_then(|s| match s {
+                DataSource::Path(p) => Some(p.as_path()),
+                DataSource::Url(_) => None,
+            }),
+        );
+        // Also copy so the user can paste if launch fails.
+        let _ = copy_text(&self.prompt_text);
+        match GrokLaunch::prepare(
+            &self.prompt_text,
+            mode,
+            cfg.grok_bin.as_deref(),
+            cwd,
+            &cfg.grok_extra_args,
+        ) {
+            Ok(launch) => {
+                self.status = format!(
+                    "Launching Grok Build ({}) · {} fn · esc after it exits",
+                    mode.as_str(),
+                    self.batch.len()
+                );
+                self.pending_grok = Some(launch);
+            }
+            Err(e) => {
+                self.error = Some(format!("{e:#}"));
+                self.status = "Grok launch failed (prompt still copied if clipboard ok)".into();
+            }
+        }
+    }
+
     async fn on_key(&mut self, ev: KeyEvent) {
         let mods = ev.modifiers;
         // Keep original case for typing; lower-case for command keys.
@@ -1956,6 +2014,11 @@ Add functions with b on Overview or Priorities \
                 // Ensure disasm/draft are loaded before copy (web always has detail).
                 self.rebuild_prompt().await;
                 self.copy_prompt();
+            }
+            // g = hand batch prompt to Grok Build (Prompt page; needs batch).
+            KeyCode::Char('g') if self.screen == Screen::Prompt => {
+                self.rebuild_prompt().await;
+                self.queue_grok_launch();
             }
             // Shift+b = clear entire batch (plain b toggles selected).
             KeyCode::Char('b') if mods.contains(KeyModifiers::SHIFT) => {
@@ -3239,6 +3302,38 @@ async fn run_loop(
                 Err(e) => {
                     app.error = Some(format!("editor: {e:#}"));
                     app.status = format!("File left at {}", path.display());
+                }
+            }
+        }
+
+        // Suspend TUI, run Grok Build with the batch prompt, resume.
+        if let Some(launch) = app.pending_grok.take() {
+            disable_raw_mode()?;
+            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+            terminal.show_cursor()?;
+            eprintln!(
+                "chaos → Grok Build ({}) · prompt {}\n",
+                launch.mode.as_str(),
+                launch.prompt_path.display()
+            );
+            let result = launch.run_foreground();
+            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+            enable_raw_mode()?;
+            terminal.hide_cursor()?;
+            terminal.clear()?;
+            match result {
+                Ok(()) => {
+                    app.status = format!(
+                        "Grok finished · prompt kept at {}",
+                        launch.prompt_path.display()
+                    );
+                }
+                Err(e) => {
+                    app.error = Some(format!("grok: {e:#}"));
+                    app.status = format!(
+                        "Grok failed · prompt at {} (also on clipboard)",
+                        launch.prompt_path.display()
+                    );
                 }
             }
         }

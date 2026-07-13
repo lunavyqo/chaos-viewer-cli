@@ -4,6 +4,7 @@ pub mod claims;
 pub mod clipboard;
 pub mod conventions;
 pub mod discover;
+pub mod grok_launch;
 pub mod load;
 pub mod prioritize;
 pub mod projects;
