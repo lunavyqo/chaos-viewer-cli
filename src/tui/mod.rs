@@ -54,15 +54,15 @@ enum MatchFilter {
     MatchedOnly,
 }
 
-/// Module list sort (parity with chaos-viewer, but best/worst use matched **count** not %).
+/// Module list sort (parity with chaos-viewer modes; best/worst use open work left).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ModuleSort {
     #[default]
     Name,
-    /// Fewest matched functions first (worst).
-    MatchedAsc,
-    /// Most matched functions first (best).
-    MatchedDesc,
+    /// Most unmatched functions left first (worst / most open work).
+    OpenDesc,
+    /// Fewest unmatched left first (best; fully matched modules sit at the top).
+    OpenAsc,
     /// Largest modules by function count.
     Count,
     /// Largest modules by byte size.
@@ -72,9 +72,9 @@ enum ModuleSort {
 impl ModuleSort {
     fn cycle(self) -> Self {
         match self {
-            Self::Name => Self::MatchedAsc,
-            Self::MatchedAsc => Self::MatchedDesc,
-            Self::MatchedDesc => Self::Count,
+            Self::Name => Self::OpenDesc,
+            Self::OpenDesc => Self::OpenAsc,
+            Self::OpenAsc => Self::Count,
             Self::Count => Self::Bytes,
             Self::Bytes => Self::Name,
         }
@@ -83,8 +83,8 @@ impl ModuleSort {
     fn label(self) -> &'static str {
         match self {
             Self::Name => "name (a–z)",
-            Self::MatchedAsc => "worst first (fewest matched)",
-            Self::MatchedDesc => "best first (most matched)",
+            Self::OpenDesc => "worst first (most unmatched left)",
+            Self::OpenAsc => "best first (fewest unmatched left)",
             Self::Count => "most functions",
             Self::Bytes => "most bytes",
         }
@@ -93,8 +93,8 @@ impl ModuleSort {
     fn short(self) -> &'static str {
         match self {
             Self::Name => "name",
-            Self::MatchedAsc => "worst",
-            Self::MatchedDesc => "best",
+            Self::OpenDesc => "worst",
+            Self::OpenAsc => "best",
             Self::Count => "count",
             Self::Bytes => "bytes",
         }
@@ -109,21 +109,22 @@ struct ModuleAgg {
     bytes: u64,
 }
 
+impl ModuleAgg {
+    fn open(self) -> usize {
+        self.total.saturating_sub(self.matched)
+    }
+}
+
 /// Sort module names in place using precomputed aggregates.
 fn sort_modules(mods: &mut [String], stats: &HashMap<String, ModuleAgg>, mode: ModuleSort) {
     let name_cmp = |a: &String, b: &String| a.cmp(b);
+    let open = |name: &String| stats.get(name).map(|s| s.open()).unwrap_or(0);
     match mode {
         ModuleSort::Name => mods.sort_by(name_cmp),
-        ModuleSort::MatchedAsc => mods.sort_by(|a, b| {
-            let ma = stats.get(a).map(|s| s.matched).unwrap_or(0);
-            let mb = stats.get(b).map(|s| s.matched).unwrap_or(0);
-            ma.cmp(&mb).then_with(|| a.cmp(b))
-        }),
-        ModuleSort::MatchedDesc => mods.sort_by(|a, b| {
-            let ma = stats.get(a).map(|s| s.matched).unwrap_or(0);
-            let mb = stats.get(b).map(|s| s.matched).unwrap_or(0);
-            mb.cmp(&ma).then_with(|| a.cmp(b))
-        }),
+        // Worst: biggest pile of unmatched work first.
+        ModuleSort::OpenDesc => mods.sort_by(|a, b| open(b).cmp(&open(a)).then_with(|| a.cmp(b))),
+        // Best: least left (all matched / 0 open) first.
+        ModuleSort::OpenAsc => mods.sort_by(|a, b| open(a).cmp(&open(b)).then_with(|| a.cmp(b))),
         ModuleSort::Count => mods.sort_by(|a, b| {
             let ta = stats.get(a).map(|s| s.total).unwrap_or(0);
             let tb = stats.get(b).map(|s| s.total).unwrap_or(0);
@@ -643,7 +644,7 @@ GLOBAL
 OVERVIEW
   top: modules (h/l) · functions (j/k) · m match filter · s module sort · / search
               unmatched filter hides fully matched modules
-              sort: name · worst/best by matched count (not %) · most fns · most bytes
+              sort: name · worst/best by unmatched left · most fns · most bytes
   bottom: detail pane for the selected function (loads as you move)
   pgup/pgdn   scroll the detail pane (j/k still move the function list)
   [ / ]       scroll detail one line
@@ -3143,16 +3144,16 @@ mod tests {
     }
 
     #[test]
-    fn module_sort_matched_count_not_percent() {
-        // a: 1/2 = 50%, b: 2/100 = 2% — by percent worst is b; by count worst is a.
+    fn module_sort_best_worst_by_unmatched_left() {
+        // open: a=1, b=98, c=0 — worst is b (most left); best is c (all matched).
         let st = stats(&[("a", 1, 2, 10), ("b", 2, 100, 20), ("c", 5, 5, 5)]);
         let mut mods = vec!["a".into(), "b".into(), "c".into()];
 
-        sort_modules(&mut mods, &st, ModuleSort::MatchedAsc);
-        assert_eq!(mods, vec!["a", "b", "c"]); // 1, 2, 5 matched
+        sort_modules(&mut mods, &st, ModuleSort::OpenDesc);
+        assert_eq!(mods, vec!["b", "a", "c"]); // 98, 1, 0 unmatched
 
-        sort_modules(&mut mods, &st, ModuleSort::MatchedDesc);
-        assert_eq!(mods, vec!["c", "b", "a"]);
+        sort_modules(&mut mods, &st, ModuleSort::OpenAsc);
+        assert_eq!(mods, vec!["c", "a", "b"]); // 0, 1, 98 unmatched
     }
 
     #[test]
@@ -3174,8 +3175,8 @@ mod tests {
     fn module_sort_cycles() {
         let mut m = ModuleSort::Name;
         for expected in [
-            ModuleSort::MatchedAsc,
-            ModuleSort::MatchedDesc,
+            ModuleSort::OpenDesc,
+            ModuleSort::OpenAsc,
             ModuleSort::Count,
             ModuleSort::Bytes,
             ModuleSort::Name,
