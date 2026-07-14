@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Overview lag when switching modules / scrolling large lists (e.g. sm64ds
+  arm9 ~3k functions): build a per-module function index, draw **only the
+  visible viewport** each frame (not thousands of off-screen rows), and
+  coalesce **h/l** module navigation the same way as j/k.
 - Repo reopen freeze: GitHub atlas load no longer **downloads the multi‑MB
   `chaos-db.json` twice** (discovery + second fetch). Normal loads skip
   cache-bust query params so CDNs can help. Saved projects cache the last

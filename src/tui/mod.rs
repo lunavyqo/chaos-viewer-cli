@@ -327,6 +327,8 @@ struct App {
     fn_offset: usize,
     /// `function.id` → index in `db.functions` (avoids O(n) scans on every key).
     id_index: HashMap<String, usize>,
+    /// `module` → indices into `db.functions` (module switch without full atlas scan).
+    module_index: HashMap<String, Vec<usize>>,
     match_filter: MatchFilter,
     module_sort: ModuleSort,
     priority_mode: PriorityMode,
@@ -416,6 +418,7 @@ impl App {
             fn_sel: 0,
             fn_offset: 0,
             id_index: HashMap::new(),
+            module_index: HashMap::new(),
             match_filter: MatchFilter::All,
             module_sort: ModuleSort::Name,
             priority_mode: PriorityMode::Nearly,
@@ -1183,13 +1186,8 @@ Press ? or esc to close help."#
 
     async fn apply_db(&mut self, db: ChaosDb, reset_to_overview: bool) {
         self.refresh_claims(&db).await;
+        self.rebuild_lookup_indexes(&db);
         self.rebuild_modules(&db);
-        self.id_index = db
-            .functions
-            .iter()
-            .enumerate()
-            .map(|(i, f)| (f.id.clone(), i))
-            .collect();
         self.db = Some(db);
         if reset_to_overview {
             self.screen = Screen::Overview;
@@ -1208,6 +1206,18 @@ Press ? or esc to close help."#
                 db.match_pct_functions(),
             );
         }
+    }
+
+    /// One linear pass: id → index and module → [function indices].
+    fn rebuild_lookup_indexes(&mut self, db: &ChaosDb) {
+        let mut id_index = HashMap::with_capacity(db.functions.len());
+        let mut module_index: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, f) in db.functions.iter().enumerate() {
+            id_index.insert(f.id.clone(), i);
+            module_index.entry(f.module.clone()).or_default().push(i);
+        }
+        self.id_index = id_index;
+        self.module_index = module_index;
     }
 
     async fn refresh_claims(&mut self, db: &ChaosDb) {
@@ -1345,24 +1355,39 @@ Press ? or esc to close help."#
             self.fn_list.clear();
             return;
         };
-        let module = self.selected_module();
+        let module = self.selected_module().map(str::to_string);
         let q = self.search.to_ascii_lowercase();
         let filter = self.match_filter;
         let prev_id = self.selected_id.clone();
-        self.fn_list = db
-            .functions
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| module.map(|m| f.module == m).unwrap_or(true))
-            .filter(|(_, f)| filter.allows(f.matched))
-            .filter(|(_, f)| {
-                q.is_empty()
+
+        // Prefer per-module index (O(module size)) over scanning the whole atlas.
+        let matches = |f: &ChaosFunction| {
+            filter.allows(f.matched)
+                && (q.is_empty()
                     || f.name.to_ascii_lowercase().contains(&q)
                     || f.module.to_ascii_lowercase().contains(&q)
-                    || f.id.to_ascii_lowercase().contains(&q)
-            })
-            .map(|(i, _)| i)
-            .collect();
+                    || f.id.to_ascii_lowercase().contains(&q))
+        };
+        self.fn_list = if let Some(ref m) = module {
+            self.module_index
+                .get(m)
+                .map(|cands| {
+                    cands
+                        .iter()
+                        .copied()
+                        .filter(|&i| matches(&db.functions[i]))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            db.functions
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| matches(f))
+                .map(|(i, _)| i)
+                .collect()
+        };
+
         // Keep the same function selected if it is still visible under the filter.
         if let Some(id) = prev_id {
             if let Some(list_i) = self
@@ -1390,7 +1415,7 @@ Press ? or esc to close help."#
         let rows = priority_rows(&db.functions, &self.locked_by, self.priority_mode);
         self.priority_list = rows
             .into_iter()
-            .filter_map(|f| db.functions.iter().position(|x| x.id == f.id))
+            .filter_map(|f| self.id_index.get(&f.id).copied())
             .collect();
         self.priority_sel = 0;
         self.priority_offset = 0;
@@ -2456,14 +2481,10 @@ chaos projects local-repo <id> /path/to/decomp \
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1).await,
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1).await,
             KeyCode::Left | KeyCode::Char('h') if self.screen == Screen::Overview => {
-                self.move_module(-1);
-                self.rebuild_functions();
-                self.ensure_selected_detail().await;
+                self.apply_module_delta(-1).await;
             }
             KeyCode::Right | KeyCode::Char('l') if self.screen == Screen::Overview => {
-                self.move_module(1);
-                self.rebuild_functions();
-                self.ensure_selected_detail().await;
+                self.apply_module_delta(1).await;
             }
             KeyCode::Enter => {
                 if self.screen == Screen::Priorities {
@@ -2591,6 +2612,16 @@ chaos projects local-repo <id> /path/to/decomp \
         let i = self.module_sel as isize + delta;
         let i = ((i % n) + n) % n;
         self.module_sel = i as usize;
+    }
+
+    /// Apply coalesced module navigation (h/l). One rebuild + one detail load.
+    async fn apply_module_delta(&mut self, delta: isize) {
+        if delta == 0 || self.module_list.is_empty() {
+            return;
+        }
+        self.move_module(delta);
+        self.rebuild_functions();
+        self.ensure_selected_detail().await;
     }
 
     async fn move_sel(&mut self, delta: isize) {
@@ -3232,7 +3263,7 @@ chaos projects local-repo <id> /path/to/decomp \
             .constraints([Constraint::Percentage(28), Constraint::Percentage(72)])
             .split(rows[0]);
 
-        // Module lines
+        // Module lines — only the visible viewport (not the whole 70+ list every frame).
         let mod_height = cols[0].height.saturating_sub(2) as usize;
         Self::clamp_scroll(
             self.module_sel,
@@ -3240,11 +3271,10 @@ chaos projects local-repo <id> /path/to/decomp \
             self.module_list.len(),
             mod_height,
         );
-        let mod_lines: Vec<Line<'static>> = self
-            .module_list
-            .iter()
-            .enumerate()
-            .map(|(i, m)| {
+        let mod_end = (self.module_offset + mod_height).min(self.module_list.len());
+        let mod_lines: Vec<Line<'static>> = (self.module_offset..mod_end)
+            .map(|i| {
+                let m = &self.module_list[i];
                 let (matched, total) = self.module_counts.get(i).copied().unwrap_or((0, 0));
                 let selected = i == self.module_sel;
                 let bg = if selected {
@@ -3281,16 +3311,10 @@ chaos projects local-repo <id> /path/to/decomp \
                 format!(" Modules  ({} · s/h/l) ", self.module_sort.short())
             }
         };
-        Self::draw_line_list(
-            f,
-            cols[0],
-            mod_title,
-            &self.theme,
-            &mod_lines,
-            self.module_offset,
-        );
+        // offset 0: lines are already the visible window
+        Self::draw_line_list(f, cols[0], mod_title, &self.theme, &mod_lines, 0);
 
-        // Function lines
+        // Function lines — viewport only (arm9 alone can be ~3000 rows).
         let fn_height = cols[1].height.saturating_sub(2) as usize;
         Self::clamp_scroll(
             self.fn_sel,
@@ -3298,11 +3322,10 @@ chaos projects local-repo <id> /path/to/decomp \
             self.fn_list.len(),
             fn_height,
         );
-        let fn_lines: Vec<Line<'static>> = self
-            .fn_list
-            .iter()
-            .enumerate()
-            .map(|(list_i, &idx)| {
+        let fn_end = (self.fn_offset + fn_height).min(self.fn_list.len());
+        let fn_lines: Vec<Line<'static>> = (self.fn_offset..fn_end)
+            .map(|list_i| {
+                let idx = self.fn_list[list_i];
                 let f = &db.functions[idx];
                 let selected = list_i == self.fn_sel;
                 let bg = if selected {
@@ -3354,10 +3377,17 @@ chaos projects local-repo <id> /path/to/decomp \
                 Line::from(spans)
             })
             .collect();
-        let batched_visible = self
-            .fn_list
+        // Batch count in *this module* is O(batch), not O(all functions).
+        let mod_name = self.selected_module();
+        let batched_here = self
+            .batch
             .iter()
-            .filter(|&&idx| self.batch_index(&db.functions[idx].id).is_some())
+            .filter(|id| {
+                self.id_index
+                    .get(id.as_str())
+                    .and_then(|&i| db.functions.get(i))
+                    .is_some_and(|f| mod_name == Some(f.module.as_str()))
+            })
             .count();
         let filter = self.match_filter.label();
         let title = if self.search.is_empty() {
@@ -3365,7 +3395,7 @@ chaos projects local-repo <id> /path/to/decomp \
                 " Functions ({}) · {filter} · batch {} ({} here) · m filter · j/k / b ",
                 self.fn_list.len(),
                 self.batch_summary(),
-                batched_visible
+                batched_here
             )
         } else {
             format!(
@@ -3375,7 +3405,7 @@ chaos projects local-repo <id> /path/to/decomp \
                 self.batch_summary()
             )
         };
-        Self::draw_line_list(f, cols[1], title, &self.theme, &fn_lines, self.fn_offset);
+        Self::draw_line_list(f, cols[1], title, &self.theme, &fn_lines, 0);
 
         // Detail strip under both lists.
         self.draw_detail_pane(f, rows[1]);
@@ -3396,11 +3426,10 @@ chaos projects local-repo <id> /path/to/decomp \
             self.priority_list.len(),
             height,
         );
-        let lines: Vec<Line<'static>> = self
-            .priority_list
-            .iter()
-            .enumerate()
-            .map(|(list_i, &idx)| {
+        let pri_end = (self.priority_offset + height).min(self.priority_list.len());
+        let lines: Vec<Line<'static>> = (self.priority_offset..pri_end)
+            .map(|list_i| {
+                let idx = self.priority_list[list_i];
                 let f = &db.functions[idx];
                 let selected = list_i == self.priority_sel;
                 let bg = if selected {
@@ -3439,7 +3468,7 @@ chaos projects local-repo <id> /path/to/decomp \
                 Line::from(spans)
             })
             .collect();
-        Self::draw_line_list(f, area, title, &self.theme, &lines, self.priority_offset);
+        Self::draw_line_list(f, area, title, &self.theme, &lines, 0);
     }
 
     /// Detail panel used under Overview (modules + functions).
@@ -3703,9 +3732,10 @@ async fn run_loop(
     loop {
         terminal.draw(|f| app.draw(f))?;
         if event::poll(Duration::from_millis(16))? {
-            // Drain the queue. Coalesce rapid j/k/↑/↓ on list screens so holding
-            // a key only pays one selection update (+ one detail load) per frame.
+            // Drain the queue. Coalesce rapid list nav so holding a key only
+            // pays one selection update (+ one detail load) per frame.
             let mut nav_delta: isize = 0;
+            let mut mod_delta: isize = 0;
             let mut other_keys: Vec<KeyEvent> = Vec::new();
             while event::poll(Duration::from_millis(0))? {
                 match event::read()? {
@@ -3717,23 +3747,45 @@ async fn run_loop(
                             KeyCode::Char(c) => KeyCode::Char(c.to_ascii_lowercase()),
                             other => other,
                         };
-                        let coalescable = matches!(
+                        let overview_idle = app.screen == Screen::Overview
+                            && !app.searching
+                            && !app.naming_template
+                            && !app.show_help
+                            && !app.agent_picker_open;
+                        let list_idle = matches!(
                             app.screen,
                             Screen::Overview | Screen::Priorities | Screen::Prompt
                         ) && !app.searching
                             && !app.naming_template
                             && !app.show_help
+                            && !app.agent_picker_open;
+                        if list_idle
                             && matches!(
                                 code,
                                 KeyCode::Char('j')
                                     | KeyCode::Char('k')
                                     | KeyCode::Up
                                     | KeyCode::Down
-                            );
-                        if coalescable {
+                            )
+                        {
                             match code {
                                 KeyCode::Char('j') | KeyCode::Down => nav_delta += 1,
                                 KeyCode::Char('k') | KeyCode::Up => nav_delta -= 1,
+                                _ => {}
+                            }
+                        } else if overview_idle
+                            && matches!(
+                                code,
+                                KeyCode::Char('h')
+                                    | KeyCode::Char('l')
+                                    | KeyCode::Left
+                                    | KeyCode::Right
+                            )
+                        {
+                            // Module list: coalesce h/l so holding the key is not O(n) rebuilds.
+                            match code {
+                                KeyCode::Char('l') | KeyCode::Right => mod_delta += 1,
+                                KeyCode::Char('h') | KeyCode::Left => mod_delta -= 1,
                                 _ => {}
                             }
                         } else {
@@ -3741,6 +3793,10 @@ async fn run_loop(
                             if nav_delta != 0 {
                                 app.move_sel(nav_delta).await;
                                 nav_delta = 0;
+                            }
+                            if mod_delta != 0 {
+                                app.apply_module_delta(mod_delta).await;
+                                mod_delta = 0;
                             }
                             other_keys.push(key);
                         }
@@ -3751,6 +3807,9 @@ async fn run_loop(
             }
             if nav_delta != 0 {
                 app.move_sel(nav_delta).await;
+            }
+            if mod_delta != 0 {
+                app.apply_module_delta(mod_delta).await;
             }
             for key in other_keys {
                 app.on_key(key).await;
