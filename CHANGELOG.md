@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Repo reopen freeze: GitHub atlas load no longer **downloads the multi‑MB
+  `chaos-db.json` twice** (discovery + second fetch). Normal loads skip
+  cache-bust query params so CDNs can help. Saved projects cache the last
+  raw `atlas_url` for a single-GET reopen.
+
 ## [0.1.0] — 2026-07-13
 
 First public release of **chaos-viewer-cli** (`chaos` binary).

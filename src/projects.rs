@@ -34,6 +34,11 @@ pub struct ProjectProfile {
     /// Optional; independent of `source` (which may be a GitHub URL for the atlas).
     #[serde(default)]
     pub local_repo: Option<String>,
+    /// Last successfully loaded raw atlas URL (e.g. raw.githubusercontent.com/…).
+    /// Speeds up reopen: try this first, fall back to full GitHub discovery.
+    /// Never used as the saved *source* key (that stays the GitHub/path the user typed).
+    #[serde(default)]
+    pub atlas_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -256,6 +261,7 @@ mod tests {
                 branch: None,
                 convention: Convention::Default,
                 local_repo: None,
+                atlas_url: None,
             })
             .unwrap();
         store.set_active(Some("demo")).unwrap();

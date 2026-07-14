@@ -6,12 +6,15 @@ use reqwest::Client;
 use crate::schema::ChaosDb;
 
 /// Probe a GitHub repo for a published Chaos Viewer data file.
-/// Order matches the web viewer in tangosdev/chaos-viewer.
-pub async fn discover_data_url(
+///
+/// Returns the raw URL **and** the already-parsed atlas so callers do not need
+/// a second multi‑MB download. Order matches the web viewer in
+/// tangosdev/chaos-viewer.
+pub async fn discover_chaos_db(
     client: &Client,
     github: &str,
     branch: Option<&str>,
-) -> Result<String> {
+) -> Result<(String, ChaosDb)> {
     let (owner, name) =
         parse_github(github).ok_or_else(|| anyhow!("not a github.com repo URL: {github}"))?;
 
@@ -38,26 +41,47 @@ pub async fn discover_data_url(
     ]);
 
     for url in cands {
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let text = resp.text().await.context("read candidate body")?;
-                if let Ok(db) = serde_json::from_str::<ChaosDb>(&text) {
-                    if db.stats.total_functions > 0 || !db.functions.is_empty() {
-                        return Ok(url);
-                    }
-                    // empty but valid schema still counts (setup projects)
-                    if text.contains("\"functions\"") && text.contains("\"stats\"") {
-                        return Ok(url);
-                    }
-                }
-            }
-            _ => continue,
+        match try_load_atlas(client, &url).await {
+            Ok(db) => return Ok((url, db)),
+            Err(_) => continue,
         }
     }
 
     Err(anyhow!(
         "no published chaos-db.json found for {github} (tried chaos-data, main, master, pages)"
     ))
+}
+
+/// Probe only; returns the URL of the first valid atlas.
+pub async fn discover_data_url(
+    client: &Client,
+    github: &str,
+    branch: Option<&str>,
+) -> Result<String> {
+    Ok(discover_chaos_db(client, github, branch).await?.0)
+}
+
+/// Try one candidate URL. Rejects non-success HTTP without downloading a body
+/// when possible; validates schema when the body is present.
+pub async fn try_load_atlas(client: &Client, url: &str) -> Result<ChaosDb> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("HTTP {} for {url}", resp.status());
+    }
+    let text = resp.text().await.context("read candidate body")?;
+    let db: ChaosDb = serde_json::from_str(&text).context("parse chaos-db.json")?;
+    if db.stats.total_functions > 0 || !db.functions.is_empty() {
+        return Ok(db);
+    }
+    // empty but valid schema still counts (setup projects)
+    if text.contains("\"functions\"") && text.contains("\"stats\"") {
+        return Ok(db);
+    }
+    anyhow::bail!("empty or invalid atlas at {url}");
 }
 
 pub fn parse_github(github: &str) -> Option<(String, String)> {
@@ -121,8 +145,20 @@ mod tests {
             ("tangosdev".into(), "sm64ds-decomp".into())
         );
         assert_eq!(
-            parse_github("https://github.com/you/repo.git/").unwrap(),
+            parse_github("https://github.com/you/repo.git").unwrap(),
             ("you".into(), "repo".into())
         );
+    }
+
+    #[test]
+    fn sources_equivalent_github() {
+        assert!(sources_equivalent(
+            "https://github.com/you/sm64ds-decomp",
+            "https://github.com/you/sm64ds-decomp/"
+        ));
+        assert!(sources_equivalent(
+            "https://github.com/You/Repo",
+            "https://github.com/you/repo.git"
+        ));
     }
 }

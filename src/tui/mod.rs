@@ -25,7 +25,7 @@ use crate::conventions::Convention;
 use crate::discover::sources_equivalent;
 use crate::grok_launch::{launch_agent, resolve_repo_cwd, AgentKind, GrokLaunchMode, TerminalHost};
 use crate::load::{
-    details_base_from_source, load_chaos_db, load_function_detail, DataSource, DetailCache,
+    details_base_from_source, load_chaos_db_opts, load_function_detail, DataSource, DetailCache,
 };
 use crate::prioritize::{priority_rows, PriorityMode};
 use crate::projects::{ProjectProfile, ProjectStore};
@@ -786,6 +786,17 @@ Press ? or esc to close help."#
     }
 
     async fn load_from_with_branch(&mut self, input: &str, branch: Option<&str>) -> Result<()> {
+        self.load_from_with_branch_opts(input, branch, None, false)
+            .await
+    }
+
+    async fn load_from_with_branch_opts(
+        &mut self,
+        input: &str,
+        branch: Option<&str>,
+        preferred_atlas_url: Option<&str>,
+        fresh: bool,
+    ) -> Result<()> {
         self.status = format!("Loading {input}…");
         self.error = None;
         let input = input.trim();
@@ -793,9 +804,25 @@ Press ? or esc to close help."#
             && !input.contains("raw.githubusercontent.com")
             && !input.ends_with(".json")
         {
-            load_chaos_db(&self.client, None, Some(input), branch).await?
+            load_chaos_db_opts(
+                &self.client,
+                None,
+                Some(input),
+                branch,
+                preferred_atlas_url,
+                fresh,
+            )
+            .await?
         } else {
-            load_chaos_db(&self.client, Some(input), None, None).await?
+            load_chaos_db_opts(
+                &self.client,
+                Some(input),
+                None,
+                None,
+                preferred_atlas_url,
+                fresh,
+            )
+            .await?
         };
         let base = details_base_from_source(&source);
         self.detail_cache = Some(DetailCache::new(base));
@@ -803,15 +830,44 @@ Press ? or esc to close help."#
         self.load_input = Some(input.to_string());
         self.setup_input = input.to_string();
         self.source = Some(source);
-        // Switching repo clears batch / selection noise.
-        self.batch.clear();
-        self.selected_id = None;
-        self.detail = None;
-        self.invalidate_detail_lines();
+        // Switching repo clears batch / selection noise (not on soft refresh).
+        if !fresh {
+            self.batch.clear();
+            self.selected_id = None;
+            self.detail = None;
+            self.invalidate_detail_lines();
+        }
         // Align active profile with what we actually loaded (or clear a stale one).
         self.sync_active_project_to_load_input();
-        self.apply_db(db, true).await;
+        // Remember raw atlas URL on the active profile for fast reopen.
+        self.remember_atlas_url_on_active();
+        self.apply_db(db, !fresh).await;
         Ok(())
+    }
+
+    /// Persist last raw atlas URL onto the active saved project (if any).
+    fn remember_atlas_url_on_active(&mut self) {
+        let Some(id) = self.project_store.active_id.clone() else {
+            return;
+        };
+        let Some(DataSource::Url(url)) = &self.source else {
+            return;
+        };
+        // Only cache raw atlas endpoints, never a github.com HTML repo page.
+        if !url.contains("raw.githubusercontent.com")
+            && !url.contains("github.io/")
+            && !url.ends_with(".json")
+        {
+            return;
+        }
+        let Some(mut p) = self.project_store.get(&id).cloned() else {
+            return;
+        };
+        if p.atlas_url.as_deref() == Some(url.as_str()) {
+            return;
+        }
+        p.atlas_url = Some(url.clone());
+        let _ = self.project_store.upsert(p);
     }
 
     /// Prefer matching a saved profile to `load_input`; otherwise clear active.
@@ -846,9 +902,14 @@ Press ? or esc to close help."#
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown project '{id}'"))?;
-        // set_active after successful load only — via load_from_with_branch sync
-        self.load_from_with_branch(&profile.source, profile.branch.as_deref())
-            .await?;
+        // Prefer last raw atlas URL (one GET) over full multi-probe discovery.
+        self.load_from_with_branch_opts(
+            &profile.source,
+            profile.branch.as_deref(),
+            profile.atlas_url.as_deref(),
+            false,
+        )
+        .await?;
         // Force this profile active even if source matching failed (e.g. local path forms).
         self.project_store.set_active(Some(&profile.id))?;
         if let Some(i) = self.project_store.index_of(&profile.id) {
@@ -856,6 +917,8 @@ Press ? or esc to close help."#
         }
         self.convention = profile.convention;
         self.sync_template_to_convention();
+        // Ensure atlas_url is stored under this id (active may have changed during load).
+        self.remember_atlas_url_on_active();
         self.status = format!(
             "Loaded project {} ({}) · [{}] · {}",
             profile.name,
@@ -984,6 +1047,16 @@ Press ? or esc to close help."#
                 None
             }
         });
+        let existing_atlas = self
+            .project_store
+            .get(&id)
+            .and_then(|p| p.atlas_url.clone())
+            .or_else(|| {
+                self.source.as_ref().and_then(|s| match s {
+                    DataSource::Url(u) => Some(u.clone()),
+                    DataSource::Path(_) => None,
+                })
+            });
         self.project_store.upsert(ProjectProfile {
             id: id.clone(),
             name,
@@ -992,6 +1065,7 @@ Press ? or esc to close help."#
             // New saves keep the session convention (default unless cycling first).
             convention: self.convention,
             local_repo,
+            atlas_url: existing_atlas,
         })?;
         self.project_store.set_active(Some(&id))?;
         self.project_sel = self.project_store.index_of(&id).unwrap_or(0);
@@ -1031,18 +1105,24 @@ Press ? or esc to close help."#
         let prev_screen = self.screen;
         let prev_priority_mode = self.priority_mode;
 
+        // Soft update: cache-bust remote GETs; keep preferred atlas URL when we have one.
+        let preferred = self.source.as_ref().and_then(|s| match s {
+            DataSource::Url(u) => Some(u.as_str()),
+            DataSource::Path(_) => None,
+        });
         let (db, source) = if input.contains("github.com/")
             && !input.contains("raw.githubusercontent.com")
             && !input.ends_with(".json")
         {
-            load_chaos_db(&self.client, None, Some(&input), None).await?
+            load_chaos_db_opts(&self.client, None, Some(&input), None, preferred, true).await?
         } else {
-            load_chaos_db(&self.client, Some(&input), None, None).await?
+            load_chaos_db_opts(&self.client, Some(&input), None, None, preferred, true).await?
         };
         let base = details_base_from_source(&source);
         self.detail_cache = Some(DetailCache::new(base));
         self.load_input = Some(input);
         self.source = Some(source);
+        self.remember_atlas_url_on_active();
 
         self.priority_mode = prev_priority_mode;
         self.apply_db(db, false).await;

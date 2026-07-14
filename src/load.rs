@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 
-use crate::discover::discover_data_url;
+use crate::discover::{discover_chaos_db, try_load_atlas};
 use crate::schema::{ChaosDb, FunctionDetail};
 
 #[derive(Debug, Clone)]
@@ -51,21 +51,57 @@ pub fn details_base_from_source(source: &DataSource) -> String {
     }
 }
 
+/// Load atlas data.
+///
+/// - `preferred_atlas_url`: last-known raw JSON URL (skips full GitHub discovery
+///   when still valid — makes project reopen much faster).
+/// - `fresh`: when true, cache-bust remote GETs (used by TUI **`u`** update).
 pub async fn load_chaos_db(
     client: &Client,
     input: Option<&str>,
     repo: Option<&str>,
     branch: Option<&str>,
 ) -> Result<(ChaosDb, DataSource)> {
+    load_chaos_db_opts(client, input, repo, branch, None, false).await
+}
+
+/// Like [`load_chaos_db`] with reopen cache + optional cache-bust.
+pub async fn load_chaos_db_opts(
+    client: &Client,
+    input: Option<&str>,
+    repo: Option<&str>,
+    branch: Option<&str>,
+    preferred_atlas_url: Option<&str>,
+    fresh: bool,
+) -> Result<(ChaosDb, DataSource)> {
+    // Fast path: last known raw atlas URL (reopen saved GitHub projects).
+    if let Some(url) = preferred_atlas_url.map(str::trim).filter(|s| !s.is_empty()) {
+        match fetch_json::<ChaosDb>(client, url, fresh).await {
+            Ok(db) => return Ok((db, DataSource::Url(url.to_string()))),
+            Err(_) => {
+                // Fall through to full discovery / input path.
+            }
+        }
+    }
+
     if let Some(repo) = repo {
-        let url = discover_data_url(client, repo, branch).await?;
-        let db = fetch_json::<ChaosDb>(client, &url).await?;
+        // Discover downloads + parses once — do not re-fetch the multi-MB body.
+        let (url, db) = discover_chaos_db(client, repo, branch).await?;
         return Ok((db, DataSource::Url(url)));
     }
 
     let input = input.ok_or_else(|| {
         anyhow!("provide --input <path|url> or --repo <github-url> (or open the TUI and enter one)")
     })?;
+
+    // Bare GitHub repo typed as --input still goes through discovery once.
+    if input.contains("github.com/")
+        && !input.contains("raw.githubusercontent.com")
+        && !input.ends_with(".json")
+    {
+        let (url, db) = discover_chaos_db(client, input, branch).await?;
+        return Ok((db, DataSource::Url(url)));
+    }
 
     let source = DataSource::from_input(input);
     let db = match &source {
@@ -74,15 +110,29 @@ pub async fn load_chaos_db(
                 std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
             serde_json::from_str(&text).context("parse chaos-db.json")?
         }
-        DataSource::Url(u) => fetch_json(client, u).await?,
+        DataSource::Url(u) => {
+            if fresh {
+                fetch_json(client, u, true).await?
+            } else {
+                try_load_atlas(client, u).await?
+            }
+        }
     };
     Ok((db, source))
 }
 
-async fn fetch_json<T: serde::de::DeserializeOwned>(client: &Client, url: &str) -> Result<T> {
-    let busted = cache_bust(url);
+async fn fetch_json<T: serde::de::DeserializeOwned>(
+    client: &Client,
+    url: &str,
+    fresh: bool,
+) -> Result<T> {
+    let req_url = if fresh {
+        cache_bust(url)
+    } else {
+        url.to_string()
+    };
     let resp = client
-        .get(&busted)
+        .get(&req_url)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?
@@ -148,7 +198,7 @@ pub async fn load_function_detail(
     let map: HashMap<String, FunctionDetail> = if path_or_url.starts_with("http://")
         || path_or_url.starts_with("https://")
     {
-        match fetch_json(client, &path_or_url).await {
+        match fetch_json(client, &path_or_url, false).await {
             Ok(m) => m,
             Err(_) => {
                 cache
