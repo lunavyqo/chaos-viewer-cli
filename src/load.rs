@@ -207,10 +207,9 @@ pub async fn ensure_module_chunk(client: &Client, cache: &DetailCache, module: &
     let path_or_url = format!("{}{module}.json", cache.base);
     let map: HashMap<String, FunctionDetail> =
         if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
-            match fetch_json(client, &path_or_url, false).await {
-                Ok(m) => m,
-                Err(_) => HashMap::new(),
-            }
+            fetch_json(client, &path_or_url, false)
+                .await
+                .unwrap_or_default()
         } else {
             let p = PathBuf::from(&path_or_url);
             if !p.exists() {
