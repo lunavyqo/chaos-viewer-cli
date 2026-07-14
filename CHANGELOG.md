@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- After loading an atlas, **background-prefetch all module detail chunks** while
+  the UI is idle (status: `Prefetching details… n/N`). No need to visit every
+  module once by hand to warm the cache.
+
 ### Fixed
 
 - Overview lag when switching modules / scrolling large lists (e.g. sm64ds

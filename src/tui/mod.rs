@@ -25,7 +25,8 @@ use crate::conventions::Convention;
 use crate::discover::sources_equivalent;
 use crate::grok_launch::{launch_agent, resolve_repo_cwd, AgentKind, GrokLaunchMode, TerminalHost};
 use crate::load::{
-    details_base_from_source, load_chaos_db_opts, load_function_detail, DataSource, DetailCache,
+    details_base_from_source, ensure_module_chunk, load_chaos_db_opts, load_function_detail,
+    DataSource, DetailCache,
 };
 use crate::prioritize::{priority_rows, PriorityMode};
 use crate::projects::{ProjectProfile, ProjectStore};
@@ -312,6 +313,10 @@ struct App {
     source: Option<DataSource>,
     client: Client,
     detail_cache: Option<DetailCache>,
+    /// Modules still waiting for background detail-chunk prefetch (after load).
+    detail_prefetch_queue: Vec<String>,
+    detail_prefetch_done: usize,
+    detail_prefetch_total: usize,
     locked_by: HashMap<String, String>,
     claims_status: String,
     claims_count: usize,
@@ -405,6 +410,9 @@ impl App {
             source: None,
             client,
             detail_cache: None,
+            detail_prefetch_queue: Vec::new(),
+            detail_prefetch_done: 0,
+            detail_prefetch_total: 0,
             locked_by: HashMap::new(),
             claims_status: "idle".into(),
             claims_count: 0,
@@ -1197,14 +1205,88 @@ Press ? or esc to close help."#
         self.ensure_selected_detail().await;
         self.rebuild_prompt().await;
         self.invalidate_detail_lines();
+        // Warm every module's detail JSON in the background so first h/l is not a
+        // manual "visit once" for each module.
+        self.queue_detail_prefetch();
         if let Some(db) = &self.db {
-            self.status = format!(
-                "Loaded {} · {}/{} fn ({:.2}%)",
-                db.project_name(),
-                db.stats.matched_functions,
-                db.stats.total_functions,
-                db.match_pct_functions(),
-            );
+            let n = self.detail_prefetch_total;
+            self.status = if n > 1 {
+                format!(
+                    "Loaded {} · {}/{} fn ({:.2}%) · prefetching details 0/{n}…",
+                    db.project_name(),
+                    db.stats.matched_functions,
+                    db.stats.total_functions,
+                    db.match_pct_functions(),
+                )
+            } else {
+                format!(
+                    "Loaded {} · {}/{} fn ({:.2}%)",
+                    db.project_name(),
+                    db.stats.matched_functions,
+                    db.stats.total_functions,
+                    db.match_pct_functions(),
+                )
+            };
+        }
+    }
+
+    /// Queue all modules for idle-time detail prefetch (current module first).
+    fn queue_detail_prefetch(&mut self) {
+        let mut mods: Vec<String> = self.module_index.keys().cloned().collect();
+        mods.sort();
+        if let Some(cur) = self.selected_module().map(str::to_string) {
+            if let Some(i) = mods.iter().position(|m| m == &cur) {
+                let m = mods.remove(i);
+                mods.insert(0, m);
+            }
+        }
+        // Skip modules already in cache (e.g. soft update).
+        if let Some(cache) = &self.detail_cache {
+            mods.retain(|m| !cache.is_module_loaded(m));
+        }
+        self.detail_prefetch_total = mods.len();
+        self.detail_prefetch_done = 0;
+        self.detail_prefetch_queue = mods;
+    }
+
+    /// Fetch one module detail chunk. Called only while the UI is idle so
+    /// navigation stays snappy.
+    async fn pump_detail_prefetch(&mut self) {
+        let Some(module) = self.detail_prefetch_queue.first().cloned() else {
+            return;
+        };
+        if let Some(cache) = &self.detail_cache {
+            if !cache.is_module_loaded(&module) {
+                let _ = ensure_module_chunk(&self.client, cache, &module).await;
+            }
+        }
+        self.detail_prefetch_queue.remove(0);
+        self.detail_prefetch_done += 1;
+        let done = self.detail_prefetch_done;
+        let total = self.detail_prefetch_total;
+        // Only update the status bar while it still looks like a load/prefetch line
+        // (do not clobber "Overview", search, errors, etc.).
+        let can_report = self.error.is_none()
+            && (self.status.starts_with("Loaded ")
+                || self.status.starts_with("Prefetching ")
+                || self.status.contains("prefetching details")
+                || self.status.contains("details ready"));
+        if !can_report {
+            return;
+        }
+        if self.detail_prefetch_queue.is_empty() {
+            if let Some(db) = &self.db {
+                self.status = format!(
+                    "{} · {}/{} fn · details ready ({total} modules)",
+                    db.project_name(),
+                    db.stats.matched_functions,
+                    db.stats.total_functions,
+                );
+            } else {
+                self.status = format!("Details ready ({total} modules)");
+            }
+        } else {
+            self.status = format!("Prefetching details… {done}/{total}");
         }
     }
 
@@ -3731,7 +3813,11 @@ async fn run_loop(
 ) -> Result<()> {
     loop {
         terminal.draw(|f| app.draw(f))?;
+        // Idle frames: warm remaining module detail chunks in the background
+        // (does not run while keys are pending, so h/l/j/k stay responsive).
+        let mut had_input = false;
         if event::poll(Duration::from_millis(16))? {
+            had_input = true;
             // Drain the queue. Coalesce rapid list nav so holding a key only
             // pays one selection update (+ one detail load) per frame.
             let mut nav_delta: isize = 0;
@@ -3814,6 +3900,9 @@ async fn run_loop(
             for key in other_keys {
                 app.on_key(key).await;
             }
+        }
+        if !had_input && !app.detail_prefetch_queue.is_empty() {
+            app.pump_detail_prefetch().await;
         }
 
         // Suspend TUI, open external editor for a new/edited template, resume.

@@ -179,6 +179,55 @@ impl DetailCache {
         let mod_map = guard.get(module)?;
         Some(mod_map.get(name).cloned())
     }
+
+    /// Whether the module detail JSON has been fetched (even if empty / missing).
+    pub fn is_module_loaded(&self, module: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("detail cache lock")
+            .contains_key(module)
+    }
+
+    pub fn loaded_module_count(&self) -> usize {
+        self.inner.lock().expect("detail cache lock").len()
+    }
+}
+
+/// Ensure a module's detail chunk is in the cache (full module map).
+///
+/// Missing remote/local files are cached as empty maps so we do not retry forever.
+pub async fn ensure_module_chunk(client: &Client, cache: &DetailCache, module: &str) -> Result<()> {
+    {
+        let guard = cache.inner.lock().expect("detail cache lock");
+        if guard.contains_key(module) {
+            return Ok(());
+        }
+    }
+
+    let path_or_url = format!("{}{module}.json", cache.base);
+    let map: HashMap<String, FunctionDetail> =
+        if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
+            match fetch_json(client, &path_or_url, false).await {
+                Ok(m) => m,
+                Err(_) => HashMap::new(),
+            }
+        } else {
+            let p = PathBuf::from(&path_or_url);
+            if !p.exists() {
+                HashMap::new()
+            } else {
+                let text =
+                    std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
+                serde_json::from_str(&text).context("parse detail chunk")?
+            }
+        };
+
+    cache
+        .inner
+        .lock()
+        .expect("detail cache lock")
+        .insert(module.to_string(), map);
+    Ok(())
 }
 
 pub async fn load_function_detail(
@@ -187,49 +236,9 @@ pub async fn load_function_detail(
     module: &str,
     name: &str,
 ) -> Result<Option<FunctionDetail>> {
-    {
-        let guard = cache.inner.lock().expect("detail cache lock");
-        if let Some(mod_map) = guard.get(module) {
-            return Ok(mod_map.get(name).cloned());
-        }
-    }
-
-    let path_or_url = format!("{}{module}.json", cache.base);
-    let map: HashMap<String, FunctionDetail> = if path_or_url.starts_with("http://")
-        || path_or_url.starts_with("https://")
-    {
-        match fetch_json(client, &path_or_url, false).await {
-            Ok(m) => m,
-            Err(_) => {
-                cache
-                    .inner
-                    .lock()
-                    .expect("detail cache lock")
-                    .insert(module.to_string(), HashMap::new());
-                return Ok(None);
-            }
-        }
-    } else {
-        let p = PathBuf::from(&path_or_url);
-        if !p.exists() {
-            cache
-                .inner
-                .lock()
-                .expect("detail cache lock")
-                .insert(module.to_string(), HashMap::new());
-            return Ok(None);
-        }
-        let text = std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
-        serde_json::from_str(&text).context("parse detail chunk")?
-    };
-
-    let detail = map.get(name).cloned();
-    cache
-        .inner
-        .lock()
-        .expect("detail cache lock")
-        .insert(module.to_string(), map);
-    Ok(detail)
+    ensure_module_chunk(client, cache, module).await?;
+    let guard = cache.inner.lock().expect("detail cache lock");
+    Ok(guard.get(module).and_then(|m| m.get(name).cloned()))
 }
 
 #[cfg(test)]
