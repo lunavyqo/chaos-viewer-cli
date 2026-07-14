@@ -484,9 +484,11 @@ async fn main() -> Result<()> {
                     let convention = Convention::parse(&convention).with_context(|| {
                         format!("unknown convention '{convention}' (use default or experimental)")
                     })?;
-                    // Preserve previous local_repo when re-adding without --local-repo.
+                    // Preserve previous local_repo / atlas_url when re-adding without flags.
+                    let prev = store.get(&id).cloned();
                     let local_repo =
-                        local_repo.or_else(|| store.get(&id).and_then(|p| p.local_repo.clone()));
+                        local_repo.or_else(|| prev.as_ref().and_then(|p| p.local_repo.clone()));
+                    let atlas_url = prev.and_then(|p| p.atlas_url);
                     store.upsert(ProjectProfile {
                         id: id.clone(),
                         name,
@@ -494,6 +496,7 @@ async fn main() -> Result<()> {
                         branch,
                         convention,
                         local_repo: local_repo.clone(),
+                        atlas_url,
                     })?;
                     if use_now {
                         store.set_active(Some(&id))?;
