@@ -7,18 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- After loading an atlas, **background-prefetch all module detail chunks** while
-  the UI is idle (status: `Prefetching details… n/N`). No need to visit every
-  module once by hand to warm the cache.
-
 ### Fixed
 
-- Overview lag when switching modules / scrolling large lists (e.g. sm64ds
-  arm9 ~3k functions): build a per-module function index, draw **only the
-  visible viewport** each frame (not thousands of off-screen rows), and
-  coalesce **h/l** module navigation the same way as j/k.
+- HTTP: enable **gzip** on reqwest (atlases were downloaded uncompressed —
+  ~2 MB instead of ~200 KB). Timeout back to a normal 60s, not 180s.
+- Removed automatic prefetch of **every** module detail chunk (arm9 alone is
+  multi‑MB; full prefetch was a network storm). Details load on demand again.
+- Overview lag when switching modules / scrolling large lists: per-module
+  function index, viewport-only drawing, coalesced **h/l**.
 - Repo reopen freeze: GitHub atlas load no longer **downloads the multi‑MB
   `chaos-db.json` twice** (discovery + second fetch). Normal loads skip
   cache-bust query params so CDNs can help. Saved projects cache the last
