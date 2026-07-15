@@ -5,6 +5,7 @@ pub mod clipboard;
 pub mod conventions;
 pub mod discover;
 pub mod grok_launch;
+pub mod http;
 pub mod load;
 pub mod prioritize;
 pub mod projects;
@@ -21,6 +22,7 @@ pub use claims::{
     ClaimsSession,
 };
 pub use discover::{discover_chaos_db, discover_data_url};
+pub use http::build_client;
 pub use load::{
     details_base_from_source, load_chaos_db, load_chaos_db_opts, load_function_detail, DataSource,
 };

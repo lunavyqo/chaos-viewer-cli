@@ -40,16 +40,41 @@ pub async fn discover_chaos_db(
         format!("https://{owner}.github.io/{name}/chaos-db.json"),
     ]);
 
-    for url in cands {
-        match try_load_atlas(client, &url).await {
-            Ok(db) => return Ok((url, db)),
-            Err(_) => continue,
+    let mut last_err: Option<String> = None;
+    let mut saw_timeout = false;
+    for url in &cands {
+        match try_load_atlas(client, url).await {
+            Ok(db) => return Ok((url.clone(), db)),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                // Prefer reporting timeouts / network errors on primary candidates.
+                if msg.contains("timed out")
+                    || msg.contains("timeout")
+                    || msg.contains("error sending request")
+                {
+                    saw_timeout = true;
+                    last_err = Some(format!("{url}: {msg}"));
+                } else if last_err.is_none() {
+                    last_err = Some(format!("{url}: {msg}"));
+                }
+                continue;
+            }
         }
     }
 
-    Err(anyhow!(
-        "no published chaos-db.json found for {github} (tried chaos-data, main, master, pages)"
-    ))
+    if saw_timeout {
+        Err(anyhow!(
+            "could not load chaos-db.json for {github}: network timed out. \
+Last error: {}",
+            last_err.unwrap_or_else(|| "unknown".into())
+        ))
+    } else {
+        Err(anyhow!(
+            "no published chaos-db.json found for {github} (tried chaos-data, main, master, pages). \
+Last probe: {}",
+            last_err.unwrap_or_else(|| "no details".into())
+        ))
+    }
 }
 
 /// Probe only; returns the URL of the first valid atlas.

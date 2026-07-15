@@ -1,9 +1,5 @@
 //! Chaos Viewer CLI — terminal decomp progress atlas.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::Duration;
-
 use anyhow::{bail, Context, Result};
 use chaos_viewer_cli::claims::{load_claims, merge_locked_map, ClaimsClient, ClaimsSession};
 use chaos_viewer_cli::clipboard::copy_text;
@@ -19,6 +15,8 @@ use chaos_viewer_cli::templates::TemplateStore;
 use chaos_viewer_cli::tui;
 use clap::{Parser, Subcommand};
 use reqwest::Client;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -229,10 +227,7 @@ enum ClaimsCmd {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
-    let client = Client::builder()
-        .user_agent("chaos-viewer-cli/0.1")
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let client = chaos_viewer_cli::http::build_client()?;
 
     let command = cli.command.take().unwrap_or(Commands::Tui);
     match command {
