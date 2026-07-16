@@ -7,8 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Local near-miss tip DB** — when `local_repo` points at a decomp with
+  `nearmiss/db.jsonl` (sm64ds-shaped tip C + `div`), prompts include that tip even
+  if published details lack a draft. CLI: `CHAOS_LOCAL_REPO` or decomp cwd; TUI:
+  project `local_repo`. Toggle still **`d`** / `--no-drafts`.
+- **Architecture + ecosystem maps** —
+  [`docs/architecture.md`](docs/architecture.md) (chaos layers / knobs) and
+  [`docs/ecosystem.md`](docs/ecosystem.md) (generic decomp stack: tool roles,
+  ledgers, agents, web viewer, god graph).
+- **Tools page (`5`)** — card grid of typical decomp instruments (purpose +
+  what each changes). Filters by category (`n`); marks ★ when found under the
+  project `local_repo`.
+- **Prompt builder: Ghidra C draft** — when available, prompts can include a
+  decompiler scaffold (`ghidra_out/0x….c` or a detail draft tagged GHIDRA
+  SCAFFOLD). TUI Prompt page: **`h`** toggles; CLI: default on, `--no-ghidra` to
+  disable, `--ghidra-dir` / `CHAOS_GHIDRA_DIR` to set the dump folder. Labeled as
+  approximate — not a match.
+- **Prompt builder: skip stored drafts** — force matching without existing
+  near-miss / NONMATCHING C. TUI Prompt: **`d`** toggles; CLI: `--no-drafts`.
+  (Ghidra remains controlled separately via **`h`** / `--no-ghidra`.)
+- **Experimental MATCH_RESULT draft trackers** — required independent booleans
+  `usedNearMissDraft` and `usedGhidraDraft` (pre-filled from what the prompt
+  included). **Inherit** from `parentAttemptId`: if an ancestor used Ghidra
+  (or a near-miss draft), descendants keep that flag true. `base.kind` may be
+  `ghidra_scaffold` or `mixed`.
+- **Prompt provenance pickers** — on the Prompt page, **`m`** opens a **model
+  picker** (fixed list, agent-picker style); **`y`** / **`w`** cycle reasoning
+  and harness. Selection is stored in `config.toml` and prefilled into
+  experimental `MATCH_RESULT.matchProvenance` (no retyping each try).
+
+### Changed
+
+- **Experimental attempt logging** is an **attempt tree**, not a flat diary:
+  `MATCH_RESULT` requires tree links (`parentAttemptId`, `base`) plus **stable
+  identity**: `schemaVersion`, atlas `functionId`, unique `attemptId`
+  (ULID/UUID — not `a1`), and `loggedAt`. Dead ends stay siblings; improved
+  near-misses become the node you continue from. Documented in
+  `docs/projects.md`; stock `chaos-experimental` prompt updated.
+
+### Removed
+
+- **Heatmap tab** (terminal squarify treemap). A full chaos-viewer-style map does
+  not translate well to a TUI; Overview + Priorities remain the navigation
+  surface. Pages are now **1** Overview · **2** Priorities · **3** Prompt ·
+  **4** Claims · **5** Tools. The unused `treemap` module is gone.
+
 ### Fixed
 
+- **TUI performance (major):** stop free-spinning at ~60 fps. The event loop
+  now redraws only after input/resize/state changes, so idle CPU is near zero
+  and key handling is not fighting continuous full-frame paints.
+- Claims merge indexes ranges by module instead of O(functions × claims).
+- Overview search: ASCII case-insensitive match without lowercasing every
+  name/id string on each rebuild.
+- **Module detail hitch:** first open of a module no longer freezes the UI for
+  ~1–2s while `details/{module}.json` downloads/parses. Chunks load in the
+  background (max 2 concurrent), the session prewarms all modules after load
+  (selected + neighbors first), and `h`/`l` stay responsive with a loading
+  detail pane until the chunk lands.
 - HTTP: enable **gzip** on reqwest (atlases were downloaded uncompressed —
   ~2 MB instead of ~200 KB). Timeout back to a normal 60s, not 180s.
 - Removed automatic prefetch of **every** module detail chunk (arm9 alone is
@@ -27,14 +85,13 @@ First public release of **chaos-viewer-cli** (`chaos` binary).
 ### Added
 
 - Interactive TUI for Chaos Viewer `chaos-db.json` atlases (path, URL, or GitHub
-  discovery): Overview, Heatmap, Priorities, Prompt, Claims.
+  discovery): Overview, Priorities, Prompt, Claims.
 - **Multi-repo projects** (`~/.config/chaos/projects.toml`): hub (`p`), save /
   switch / delete, resume last project; CLI `chaos projects …`, `--project` /
   `CHAOS_PROJECT`. Per-project **conventions** (`default` | `experimental`) and
   **`local_repo`** (TUI **`r`** or `chaos projects local-repo`).
 - Overview: match filter (`m`), module sort (`s`), detail pane with scroll,
-  batch badges; **Heatmap** treemap; priority lists (nearly / scaffolded /
-  biggest).
+  batch badges; priority lists (nearly / scaffolded / biggest).
 - Prompt builder (batch max 16): copy (`c`), clear batch (`Shift+b`), templates
   (`t` / `n` / `e` / `Shift+t`) — built-in `chaos-viewer` +
   `chaos-experimental` + user TOML under `~/.config/chaos/templates/`.

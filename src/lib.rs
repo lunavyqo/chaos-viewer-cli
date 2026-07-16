@@ -12,7 +12,7 @@ pub mod projects;
 pub mod prompt;
 pub mod schema;
 pub mod templates;
-pub mod treemap;
+pub mod tools_catalog;
 pub mod tui;
 
 pub use conventions::{Convention, Tracking};
@@ -24,7 +24,8 @@ pub use claims::{
 pub use discover::{discover_chaos_db, discover_data_url};
 pub use http::build_client;
 pub use load::{
-    details_base_from_source, load_chaos_db, load_chaos_db_opts, load_function_detail, DataSource,
+    details_base_from_source, ensure_module_chunk, load_chaos_db, load_chaos_db_opts,
+    load_function_detail, DataSource, DetailCache, DETAIL_PREWARM_CONCURRENCY,
 };
 pub use prioritize::{priority_rows, PriorityMode};
 pub use prompt::{build_prompt, PromptOptions};

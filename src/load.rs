@@ -11,6 +11,10 @@ use reqwest::Client;
 use crate::discover::{discover_chaos_db, try_load_atlas};
 use crate::schema::{ChaosDb, FunctionDetail};
 
+/// Max concurrent background detail-chunk fetches (avoids the old “prefetch
+/// every module at once” network storm while still warming the session).
+pub const DETAIL_PREWARM_CONCURRENCY: usize = 2;
+
 #[derive(Debug, Clone)]
 pub enum DataSource {
     Path(PathBuf),
@@ -155,6 +159,10 @@ fn cache_bust(url: &str) -> String {
 }
 
 /// Session-scoped detail cache keyed by module name.
+///
+/// Safe to share across tasks via [`std::sync::Arc`] — the TUI prewarms module
+/// chunks in the background so the first `h`/`l` into a module does not stall
+/// the UI on a multi‑MB JSON parse.
 pub struct DetailCache {
     inner: Mutex<HashMap<String, HashMap<String, FunctionDetail>>>,
     base: String,
@@ -191,11 +199,23 @@ impl DetailCache {
     pub fn loaded_module_count(&self) -> usize {
         self.inner.lock().expect("detail cache lock").len()
     }
+
+    /// Module names currently held in the cache (for progress UI).
+    pub fn loaded_modules(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("detail cache lock")
+            .keys()
+            .cloned()
+            .collect()
+    }
 }
 
 /// Ensure a module's detail chunk is in the cache (full module map).
 ///
 /// Missing remote/local files are cached as empty maps so we do not retry forever.
+/// Safe to call concurrently for **different** modules; same-module races both
+/// fetch once and the last insert wins (identical content).
 pub async fn ensure_module_chunk(client: &Client, cache: &DetailCache, module: &str) -> Result<()> {
     {
         let guard = cache.inner.lock().expect("detail cache lock");
@@ -215,6 +235,8 @@ pub async fn ensure_module_chunk(client: &Client, cache: &DetailCache, module: &
             if !p.exists() {
                 HashMap::new()
             } else {
+                // Large local chunks (arm9) — read + parse can take ~1–2s; keep
+                // this off the UI thread via the TUI prewarm / spawn path.
                 let text =
                     std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
                 serde_json::from_str(&text).context("parse detail chunk")?

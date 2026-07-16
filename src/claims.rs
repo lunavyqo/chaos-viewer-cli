@@ -585,14 +585,20 @@ pub fn merge_locked_map(functions: &[ChaosFunction], claims: &[Claim]) -> HashMa
     if claims.is_empty() {
         return m;
     }
+    // Index claims by module so we don't scan every claim for every function
+    // (was O(functions × claims); real atlases are ~10k functions).
+    let mut by_mod: HashMap<&str, Vec<&Claim>> = HashMap::new();
+    for c in claims {
+        by_mod.entry(c.module.as_str()).or_default().push(c);
+    }
     for f in functions {
         if f.matched {
             continue;
         }
-        for c in claims {
-            if c.module != f.module {
-                continue;
-            }
+        let Some(cs) = by_mod.get(f.module.as_str()) else {
+            continue;
+        };
+        for c in cs {
             let s = c.start.to_u64();
             let e = c.end.to_u64();
             if f.addr < e && f.addr + f.size > s {

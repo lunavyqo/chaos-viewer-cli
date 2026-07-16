@@ -66,17 +66,49 @@ Missing `convention` keys in older `projects.toml` files load as **default**.
    Experimental requires complete `matchProvenance` on matched functions; credit
    still uses `author` only. Default profiles never require provenance.
 
-2. **Every attempt logged**  
+2. **Every attempt logged as a tree**  
    Experimental work should append **every try** (including `no_progress` and
    non-improving near-misses) to the decomp’s attempt log (e.g.
-   `config/match_attempts.jsonl` via `tools/log_attempt.py`). The
-   `chaos-experimental` prompt requires a MATCH_RESULT per function per
-   iteration. Full history is **not** stuffed into `chaos-db.json` (size);
-   the atlas keeps lean credit + final how.
+   `config/match_attempts.jsonl` via `tools/log_attempt.py`). Best tip **C**
+   belongs in `nearmiss/db.jsonl` (pass `--src` on near_miss logs). The
+   `chaos-experimental` prompt requires a **MATCH_RESULT node** per function
+   per try, with **stable ids + tree links** so history is not a flat diary:
+
+   | Field | Role |
+   |---|---|
+   | `schemaVersion` | `1` — bump only when meanings change |
+   | `functionId` | Atlas `function.id` (stable; never name alone) |
+   | `attemptId` | Unique id for **this** node (ULID/UUID; never reuse `a1`/`try2`) |
+   | `parentAttemptId` | Node you built on (`null` = new root/branch) |
+   | `loggedAt` | ISO-8601 UTC when the try finished |
+   | `base.kind` | `scratch` · `previous_attempt` · `near_miss_draft` · `ghidra_scaffold` · `matched_sibling` · `mixed` |
+   | `usedNearMissDraft` | **true/false** — this try used a near-miss draft **or** any ancestor did |
+   | `usedGhidraDraft` | **true/false** — this try used Ghidra **or** any ancestor did (lineage sticks) |
+
+   Inheritance: when `parentAttemptId` is set, each flag is
+   `(this try) OR (parent's flag)`. Example: Ghidra → near_miss → match keeps
+   `usedGhidraDraft: true` on the match even if Ghidra was not re-opened.
+   | `divergences` / `improvedNearMiss` | Score vs previous best |
+
+   Sketch (one function over a few sessions):
+
+   ```text
+   functionId = arm9:0x020009e0
+   ├─ 01JA…  near_miss div=40   parent=null   base=scratch
+   │  ├─ 01JB…  no_progress     parent=01JA…  (settings retry, no win)
+   │  └─ 01JC…  near_miss div=12 parent=01JA… improved — new branch tip
+   │     └─ 01JD…  matched      parent=01JC…  continued from best near-miss
+   ```
+
+   Full history stays out of `chaos-db.json` (size); the atlas keeps lean credit
+   + final how. The jsonl is where the tree lives.
 
 3. **Stock prompt `chaos-experimental`**  
-   Emits `MATCH_RESULT` with `author` (credit) + `matchProvenance` (method) +
-   attempt status/scores. Auto-selected when loading an experimental profile.
+   Emits `MATCH_RESULT` with tree ids, `author` (credit) + `matchProvenance`
+   (method) + attempt status/scores. Auto-selected when loading an experimental
+   profile. Model / reasoning / harness are chosen once in the TUI (`m` model
+   picker · `y` / `w` for reasoning / harness) and prefilled into each
+   `MATCH_RESULT` so operators do not retype them every try.
 
 ## CLI
 

@@ -40,9 +40,54 @@ On the **Prompt** page (`4`):
 | `n` | **New** template: type an id, Enter → creates a chaos-viewer copy and opens the editor |
 | `e` | **Edit** current user template in `$EDITOR` / nano (not the built-in) |
 | `Shift+t` | Save current as default |
+| `m` | **Model picker** (fixed list, like agent picker) → prefills `matchProvenance.model` |
+| `y` | Cycle **reasoning** level: `high` → `medium` → `low` → `none` |
+| `w` | Cycle **harness** preset: `grok-build` · `cursor-agent` · `claude-code` · `codex` · `antigravity` · `manual` |
 | `c` | Copy rendered prompt |
 | `g` | Launch the **default** coding agent in a new terminal (chaos stays open) |
 | `Shift+g` | **Agent picker**: Grok / Codex / Claude / Antigravity · enter launch · **`d`** set default |
+| `d` | Toggle **stored near-miss drafts** (details `draft` and/or local `nearmiss/db.jsonl`) — off = ignore them |
+| `h` | Toggle **Ghidra C draft** (from `local_repo/ghidra_out` or detail draft) |
+
+### Provenance pickers (experimental MATCH_RESULT)
+
+On the Prompt page, **model / reasoning / harness** are pickers so you do not retype
+them into every try. Selection is saved in `~/.config/chaos/config.toml` and
+prefilled into the `chaos-experimental` `MATCH_RESULT.matchProvenance` block.
+
+| Setting | Source | Keys |
+|---------|--------|------|
+| **model** | Fixed built-in list (picker menu) | **`m`** open · j/k · enter |
+| **reasoning** | Fixed: `high` · `medium` · `low` · `none` | `y` |
+| **harness** | Fixed presets (not free-form) | `w` |
+
+Models (display → slug): Grok 4.5, Composer 2.5, Claude Sonnet 5,
+Claude Opus 4.8/4.7/4.6, Claude Fable 5, GPT 5.6 Luna/Terra/Sol,
+DeepSeek V4 Flash/Pro, GLM 5.2, Kimi K3, Hy3, StepFun 3.7, Muse Spark 1.1,
+Gemini 3.5 Pro/Flash.
+
+```toml
+# ~/.config/chaos/config.toml (written automatically by the TUI)
+provenance_model = "grok-4.5"
+provenance_reasoning = "high"
+provenance_harness = "grok-build"
+```
+
+`chaos prompt` also reads these values when rendering experimental templates.
+
+**Fresh matching (no existing C):** turn **drafts off** (`d`) and optionally Ghidra off
+(`h`), so the prompt is disasm + verify only.
+
+Ghidra scaffolds (optional): dump with the decomp’s `tools/ghidra_dump.py`, then set
+`local_repo` so chaos finds `ghidra_out/`. CLI:
+
+```bash
+chaos prompt --id '…'                 # drafts + Ghidra on by default
+chaos prompt --id '…' --no-drafts     # ignore stored near-miss C
+# Local tip C (sm64ds-shaped): set CHAOS_LOCAL_REPO=/path/to/decomp or cwd with nearmiss/db.jsonl
+chaos prompt --id '…' --no-ghidra     # ignore Ghidra scaffolds
+chaos prompt --id '…' --ghidra-dir PATH
+```
 
 Title shows the template name; `★` means it is the saved default.
 

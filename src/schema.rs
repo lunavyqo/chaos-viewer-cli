@@ -203,10 +203,13 @@ impl ChaosDb {
             .unwrap_or("unknown")
     }
 
+    /// Linear scan by id. Prefer an external `id → index` map for hot paths
+    /// (TUI keeps one on `App`); this is fine for CLI one-shots.
     pub fn find_by_id(&self, id: &str) -> Option<&ChaosFunction> {
         self.functions.iter().find(|f| f.id == id)
     }
 
+    /// Linear scan by name. Prefer indexes for interactive paths.
     pub fn find_by_name(&self, name: &str) -> Option<&ChaosFunction> {
         self.functions.iter().find(|f| f.name == name)
     }

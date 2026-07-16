@@ -78,10 +78,161 @@ pub struct UserConfig {
     /// External terminal host: `auto` | `terminal` | `iterm` | `linux` | `windows`.
     #[serde(default)]
     pub grok_terminal: Option<String>,
+    /// Currently selected model slug (must be in [`PROVENANCE_MODELS`]).
+    #[serde(default)]
+    pub provenance_model: Option<String>,
+    /// Selected reasoning level: high | xhigh | max | medium | low | none.
+    #[serde(default = "default_provenance_reasoning")]
+    pub provenance_reasoning: String,
+    /// Selected harness slug from the fixed preset list.
+    #[serde(default = "default_provenance_harness")]
+    pub provenance_harness: String,
+}
+
+/// One fixed model option for experimental MATCH_RESULT prefill.
+#[derive(Debug, Clone, Copy)]
+pub struct ProvenanceModel {
+    pub slug: &'static str,
+    pub label: &'static str,
+}
+
+/// Fixed model list (Prompt **`m`** opens a picker — not cycled, not user-extensible).
+pub const PROVENANCE_MODELS: &[ProvenanceModel] = &[
+    ProvenanceModel {
+        slug: "grok-4.5",
+        label: "Grok 4.5",
+    },
+    ProvenanceModel {
+        slug: "composer-2.5",
+        label: "Composer 2.5",
+    },
+    ProvenanceModel {
+        slug: "claude-sonnet-5",
+        label: "Claude Sonnet 5",
+    },
+    ProvenanceModel {
+        slug: "claude-opus-4.8",
+        label: "Claude Opus 4.8",
+    },
+    ProvenanceModel {
+        slug: "claude-opus-4.7",
+        label: "Claude Opus 4.7",
+    },
+    ProvenanceModel {
+        slug: "claude-opus-4.6",
+        label: "Claude Opus 4.6",
+    },
+    ProvenanceModel {
+        slug: "claude-fable-5",
+        label: "Claude Fable 5",
+    },
+    ProvenanceModel {
+        slug: "gpt-5.6-luna",
+        label: "GPT 5.6 Luna",
+    },
+    ProvenanceModel {
+        slug: "gpt-5.6-terra",
+        label: "GPT 5.6 Terra",
+    },
+    ProvenanceModel {
+        slug: "gpt-5.6-sol",
+        label: "GPT 5.6 Sol",
+    },
+    ProvenanceModel {
+        slug: "deepseek-v4-flash",
+        label: "DeepSeek V4 Flash",
+    },
+    ProvenanceModel {
+        slug: "deepseek-v4-pro",
+        label: "DeepSeek V4 Pro",
+    },
+    ProvenanceModel {
+        slug: "glm-5.2",
+        label: "GLM 5.2",
+    },
+    ProvenanceModel {
+        slug: "kimi-k3",
+        label: "Kimi K3",
+    },
+    ProvenanceModel {
+        slug: "kimi-3",
+        label: "Kimi 3",
+    },
+    ProvenanceModel {
+        slug: "hy3",
+        label: "Hy3",
+    },
+    ProvenanceModel {
+        slug: "stepfun-3.7",
+        label: "StepFun 3.7",
+    },
+    ProvenanceModel {
+        slug: "muse-spark-1.1",
+        label: "Muse Spark 1.1",
+    },
+    ProvenanceModel {
+        slug: "gemini-3.5-pro",
+        label: "Gemini 3.5 Pro",
+    },
+    ProvenanceModel {
+        slug: "gemini-3.5-flash",
+        label: "Gemini 3.5 Flash",
+    },
+];
+
+/// Fixed reasoning levels for experimental prompts (cycle with **`y`** on Prompt).
+pub const PROVENANCE_REASONING_LEVELS: &[&str] =
+    &["high", "xhigh", "max", "medium", "low", "none"];
+
+/// Fixed harness presets (cycle with **`w`** on Prompt).
+pub const PROVENANCE_HARNESS_PRESETS: &[&str] = &[
+    "grok-build",
+    "cursor-agent",
+    "claude-code",
+    "codex",
+    "antigravity",
+    "manual",
+];
+
+fn default_provenance_reasoning() -> String {
+    "high".into()
+}
+
+fn default_provenance_harness() -> String {
+    "grok-build".into()
+}
+
+/// Index of `slug` in [`PROVENANCE_MODELS`], if any.
+pub fn provenance_model_index(slug: &str) -> Option<usize> {
+    PROVENANCE_MODELS.iter().position(|m| m.slug == slug)
+}
+
+/// Display label for a known model slug, or the slug itself.
+pub fn provenance_model_label(slug: &str) -> &str {
+    provenance_model_index(slug)
+        .map(|i| PROVENANCE_MODELS[i].label)
+        .unwrap_or(slug)
 }
 
 fn default_template_id() -> String {
     BUILTIN_ID.into()
+}
+
+/// Ensure selected model / reasoning / harness are valid.
+fn normalize_provenance_config(cfg: &mut UserConfig) {
+    let selected_ok = cfg
+        .provenance_model
+        .as_ref()
+        .is_some_and(|m| provenance_model_index(m).is_some());
+    if !selected_ok {
+        cfg.provenance_model = Some(PROVENANCE_MODELS[0].slug.to_string());
+    }
+    if !PROVENANCE_REASONING_LEVELS.contains(&cfg.provenance_reasoning.as_str()) {
+        cfg.provenance_reasoning = default_provenance_reasoning();
+    }
+    if !PROVENANCE_HARNESS_PRESETS.contains(&cfg.provenance_harness.as_str()) {
+        cfg.provenance_harness = default_provenance_harness();
+    }
 }
 
 /// On-disk user template (`templates/<id>.toml`).
@@ -133,7 +284,9 @@ impl TemplateStore {
         let templates_dir = home.join("templates");
         let _ = fs::create_dir_all(&templates_dir);
 
-        let config = load_user_config(&config_path);
+        let mut config = load_user_config(&config_path);
+        // Ensure provenance picker has a usable model list + valid selection.
+        normalize_provenance_config(&mut config);
         // Seed example template once if the directory is empty (besides nothing).
         seed_example_template(&templates_dir);
 
@@ -230,6 +383,78 @@ impl TemplateStore {
         self.config.default_agent = Some(agent_id.to_string());
         save_user_config(&self.config_path, &self.config)?;
         Ok(())
+    }
+
+    /// Currently selected model slug for MATCH_RESULT prefill.
+    pub fn provenance_model(&self) -> &str {
+        self.config
+            .provenance_model
+            .as_deref()
+            .filter(|s| provenance_model_index(s).is_some())
+            .unwrap_or(PROVENANCE_MODELS[0].slug)
+    }
+
+    /// Display label for the selected model.
+    pub fn provenance_model_label(&self) -> &str {
+        provenance_model_label(self.provenance_model())
+    }
+
+    /// Currently selected reasoning level.
+    pub fn provenance_reasoning(&self) -> &str {
+        let r = self.config.provenance_reasoning.as_str();
+        if PROVENANCE_REASONING_LEVELS.contains(&r) {
+            r
+        } else {
+            "high"
+        }
+    }
+
+    /// Currently selected harness slug.
+    pub fn provenance_harness(&self) -> &str {
+        let h = self.config.provenance_harness.as_str();
+        if PROVENANCE_HARNESS_PRESETS.contains(&h) {
+            h
+        } else {
+            "grok-build"
+        }
+    }
+
+    /// Select a fixed model by slug (Prompt model picker · enter). Persists.
+    pub fn set_provenance_model(&mut self, slug: &str) -> Result<&str> {
+        if provenance_model_index(slug).is_none() {
+            bail!("unknown model slug '{slug}'");
+        }
+        self.config.provenance_model = Some(slug.to_string());
+        save_user_config(&self.config_path, &self.config)?;
+        Ok(self.provenance_model())
+    }
+
+    /// Cycle fixed reasoning levels (Prompt **`y`**).
+    pub fn cycle_provenance_reasoning(&mut self, delta: isize) -> Result<&str> {
+        let levels = PROVENANCE_REASONING_LEVELS;
+        let cur = levels
+            .iter()
+            .position(|l| *l == self.config.provenance_reasoning.as_str())
+            .unwrap_or(0) as isize;
+        let n = levels.len() as isize;
+        let next = ((cur + delta).rem_euclid(n)) as usize;
+        self.config.provenance_reasoning = levels[next].to_string();
+        save_user_config(&self.config_path, &self.config)?;
+        Ok(self.provenance_reasoning())
+    }
+
+    /// Cycle fixed harness presets (Prompt **`w`**).
+    pub fn cycle_provenance_harness(&mut self, delta: isize) -> Result<&str> {
+        let presets = PROVENANCE_HARNESS_PRESETS;
+        let cur = presets
+            .iter()
+            .position(|h| *h == self.config.provenance_harness.as_str())
+            .unwrap_or(0) as isize;
+        let n = presets.len() as isize;
+        let next = ((cur + delta).rem_euclid(n)) as usize;
+        self.config.provenance_harness = presets[next].to_string();
+        save_user_config(&self.config_path, &self.config)?;
+        Ok(self.provenance_harness())
     }
 
     /// Reload entries from disk (after creating/editing a template).
@@ -509,7 +734,13 @@ fn render_user_template(
         parts.push(expand_global(&t.header, project, n, opts));
     }
     for (fn_, det) in functions {
-        parts.push(expand_function(&t.function, project, fn_, det.as_ref()));
+        parts.push(expand_function(
+            &t.function,
+            project,
+            fn_,
+            det.as_ref(),
+            opts,
+        ));
     }
     if !t.footer.trim().is_empty() {
         parts.push(expand_global(&t.footer, project, n, opts));
@@ -576,7 +807,10 @@ fn expand_function(
     project: &ProjectConfig,
     fn_: &ChaosFunction,
     det: Option<&FunctionDetail>,
+    opts: &PromptOptions,
 ) -> String {
+    use crate::prompt::{resolve_ghidra_draft, resolve_near_miss_draft};
+
     let mut s = template.to_string();
     let verify = project
         .verify_command
@@ -609,19 +843,39 @@ fn expand_function(
         })
         .unwrap_or_default();
 
-    let (draft, draft_div, section_draft) = match det.and_then(|d| d.draft.as_ref()) {
-        Some(draft) => {
-            let div = det
-                .and_then(|d| d.draft_div)
-                .map(|d| d.to_string())
-                .unwrap_or_else(|| "undefined".into());
-            let block = format!(
+    // Near-miss tip (details draft and/or local nearmiss/db.jsonl) + optional Ghidra.
+    let (draft, draft_div, mut section_draft) = if let Some(near) =
+        resolve_near_miss_draft(fn_, det, opts)
+    {
+        let div = near
+            .draft_div
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "undefined".into());
+        let block = format!(
                 "A NEAR-MISS DRAFT EXISTS ({div} instruction(s) from matching) - START FROM THIS, do not re-decompile:\n```c\n{}\n```",
-                draft.trim_end()
+                near.text.trim_end()
             );
-            (draft.trim_end().to_string(), div, block)
+        (near.text.trim_end().to_string(), div, block)
+    } else {
+        (String::new(), String::new(), String::new())
+    };
+    if let Some(ghidra) = resolve_ghidra_draft(fn_, det, opts) {
+        let gblock = format!(
+            "GHIDRA DECOMPILER DRAFT (approximate C — NOT byte-matching). \
+Use for structure / types / callees, then REWRITE so mwccarm + verify MATCH:\n```c\n{}\n```",
+            ghidra.trim_end()
+        );
+        if section_draft.is_empty() {
+            section_draft = gblock;
+        } else {
+            section_draft = format!("{section_draft}\n\n{gblock}");
         }
-        None => (String::new(), String::new(), String::new()),
+    }
+    // {draft} raw text: prefer human near-miss, else Ghidra body.
+    let draft = if draft.is_empty() {
+        resolve_ghidra_draft(fn_, det, opts).unwrap_or_default()
+    } else {
+        draft
     };
 
     let (disasm, section_disasm) = match det.and_then(|d| d.disasm.as_ref()) {
@@ -858,6 +1112,51 @@ mod tests {
         assert!(text.contains("name = \"My Copy\""));
         assert!(text.contains("section_disasm"));
         assert!(sanitize_template_id("bad id").is_err());
+        std::env::remove_var("CHAOS_HOME");
+    }
+
+    #[test]
+    fn provenance_pickers_select_and_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CHAOS_HOME", dir.path());
+        let mut store = TemplateStore::load();
+        assert_eq!(PROVENANCE_MODELS.len(), 20);
+        assert_eq!(store.provenance_model(), "grok-4.5");
+        assert_eq!(store.provenance_model_label(), "Grok 4.5");
+        assert_eq!(store.provenance_reasoning(), "high");
+        assert_eq!(store.provenance_harness(), "grok-build");
+
+        assert_eq!(
+            store.set_provenance_model("claude-opus-4.8").unwrap(),
+            "claude-opus-4.8"
+        );
+        assert_eq!(store.provenance_model_label(), "Claude Opus 4.8");
+        assert!(store.set_provenance_model("not-a-real-model").is_err());
+        assert_eq!(store.set_provenance_model("kimi-3").unwrap(), "kimi-3");
+        assert_eq!(store.provenance_model_label(), "Kimi 3");
+        assert_eq!(
+            store.set_provenance_model("claude-opus-4.8").unwrap(),
+            "claude-opus-4.8"
+        );
+
+        // high → xhigh → max → medium → low → none → high
+        assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "xhigh");
+        assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "max");
+        assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "medium");
+        assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "low");
+        assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "none");
+        assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "high");
+
+        assert_eq!(store.cycle_provenance_harness(1).unwrap(), "cursor-agent");
+
+        // Persist to disk (read the same config path — avoid racing CHAOS_HOME
+        // with other tests that also set the env var).
+        let saved = std::fs::read_to_string(&store.config_path).unwrap();
+        let cfg: UserConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(cfg.provenance_model.as_deref(), Some("claude-opus-4.8"));
+        assert_eq!(cfg.provenance_reasoning, "high");
+        assert_eq!(cfg.provenance_harness, "cursor-agent");
+
         std::env::remove_var("CHAOS_HOME");
     }
 }
