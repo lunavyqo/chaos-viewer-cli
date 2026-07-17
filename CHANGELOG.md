@@ -43,9 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Experimental attempt logging** is an **attempt tree**, not a flat diary:
   `MATCH_RESULT` requires tree links (`parentAttemptId`, `base`) plus **stable
   identity**: `schemaVersion`, atlas `functionId`, unique `attemptId`
-  (ULID/UUID — not `a1`), and `loggedAt`. Dead ends stay siblings; improved
-  near-misses become the node you continue from. Documented in
-  `docs/projects.md`; stock `chaos-experimental` prompt updated.
+  (ULID/UUID — not `a1`). Do **not** log wall-clock times. Dead ends stay
+  siblings; improved near-misses become the node you continue from.
+  Documented in `docs/projects.md`; stock `chaos-experimental` prompt updated.
 
 ### Removed
 

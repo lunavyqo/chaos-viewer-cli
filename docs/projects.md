@@ -80,8 +80,9 @@ Missing `convention` keys in older `projects.toml` files load as **default**.
    | `functionId` | Atlas `function.id` (stable; never name alone) |
    | `attemptId` | Unique id for **this** node (ULID/UUID; never reuse `a1`/`try2`) |
    | `parentAttemptId` | Node you built on (`null` = new root/branch) |
-   | `loggedAt` | ISO-8601 UTC when the try finished |
    | `base.kind` | `scratch` · `previous_attempt` · `near_miss_draft` · `ghidra_scaffold` · `matched_sibling` · `mixed` |
+
+   Privacy: do **not** log wall-clock times (`loggedAt` / `ts`).
    | `usedNearMissDraft` | **true/false** — this try used a near-miss draft **or** any ancestor did |
    | `usedGhidraDraft` | **true/false** — this try used Ghidra **or** any ancestor did (lineage sticks) |
 
