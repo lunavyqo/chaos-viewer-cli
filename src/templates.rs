@@ -181,8 +181,9 @@ pub const PROVENANCE_MODELS: &[ProvenanceModel] = &[
 ];
 
 /// Fixed reasoning levels for experimental prompts (cycle with **`y`** on Prompt).
+/// Highest effort first: max > xhigh > high > medium > low > none.
 pub const PROVENANCE_REASONING_LEVELS: &[&str] =
-    &["high", "xhigh", "max", "medium", "low", "none"];
+    &["max", "xhigh", "high", "medium", "low", "none"];
 
 /// Fixed harness presets (cycle with **`w`** on Prompt).
 pub const PROVENANCE_HARNESS_PRESETS: &[&str] = &[
@@ -1139,12 +1140,12 @@ mod tests {
             "claude-opus-4.8"
         );
 
-        // high → xhigh → max → medium → low → none → high
-        assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "xhigh");
-        assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "max");
+        // Default high; +1 walks max…none list: high → medium → low → none → max → xhigh → high
         assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "medium");
         assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "low");
         assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "none");
+        assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "max");
+        assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "xhigh");
         assert_eq!(store.cycle_provenance_reasoning(1).unwrap(), "high");
 
         assert_eq!(store.cycle_provenance_harness(1).unwrap(), "cursor-agent");

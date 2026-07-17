@@ -423,7 +423,7 @@ matchProvenance answers HOW only:
 TOKEN RULES for matchProvenance (ai):
   - model:   GOOD: grok-4.5  claude-opus-4   BAD: "Grok 4.5"
   - harness: GOOD: grok-build  cursor-agent  BAD: "Grok Build"
-  - reasoning: high | xhigh | max | medium | low | none
+  - reasoning: max | xhigh | high | medium | low | none  (max is highest)
   Do NOT put the operator name in matchProvenance (no `by` field).
 
 Do NOT invent a match. VERIFY until MATCH.
@@ -521,7 +521,7 @@ MATCH_RESULT:
   matchProvenance:
     kind: ai                    # ai | human
     model: "{model}"            # slug; NOT display names like "Grok 4.5"
-    reasoning: "{reasoning}"    # high | xhigh | max | medium | low | none
+    reasoning: "{reasoning}"    # max | xhigh | high | medium | low | none
     harness: "{harness}"        # slug; NOT display names like "Grok Build"
   # Score this try when known (still log if null / no improvement):
   divergences: null             # int instruction divergence, or null if un scored
