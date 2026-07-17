@@ -76,6 +76,15 @@ enum Commands {
         /// Also copy to clipboard
         #[arg(long)]
         copy: bool,
+        /// Do not attach stored near-miss / NONMATCHING C drafts (match from disasm only)
+        #[arg(long)]
+        no_drafts: bool,
+        /// Do not attach Ghidra decompiler C (on by default when a draft is found)
+        #[arg(long)]
+        no_ghidra: bool,
+        /// Directory of `0xXXXXXXXX.c` Ghidra dumps (default: `./ghidra_out` or `$CHAOS_GHIDRA_DIR`)
+        #[arg(long)]
+        ghidra_dir: Option<PathBuf>,
     },
     /// List / manage prompt templates (~/.config/chaos/templates)
     Templates {
@@ -308,6 +317,9 @@ async fn main() -> Result<()> {
             template,
             out,
             copy,
+            no_drafts,
+            no_ghidra,
+            ghidra_dir,
         } => {
             let (input, repo, branch) = resolve_atlas_args(&cli)?;
             let (db, source) = load_chaos_db(
@@ -327,10 +339,19 @@ async fn main() -> Result<()> {
                 .ok()
                 .flatten();
             let project = db.project.clone().unwrap_or_default();
+            let ghidra_dir = ghidra_dir.or_else(default_ghidra_dir);
+            let local_repo = default_local_repo();
+            let store = TemplateStore::load();
             let opts = PromptOptions {
                 claims_session: ClaimsSession::from_env(),
+                include_near_miss_draft: !no_drafts,
+                include_ghidra_draft: !no_ghidra,
+                ghidra_dir,
+                local_repo,
+                provenance_model: Some(store.provenance_model().to_string()),
+                provenance_reasoning: Some(store.provenance_reasoning().to_string()),
+                provenance_harness: Some(store.provenance_harness().to_string()),
             };
-            let store = TemplateStore::load();
             let tid = template
                 .as_deref()
                 .unwrap_or_else(|| store.default_id())
@@ -761,4 +782,36 @@ fn print_fn_line(f: &chaos_viewer_cli::ChaosFunction, locked: &HashMap<String, S
         "[{flag}] {:40}  {:>10}  0x{:08x}  {:>6}B  {}",
         f.name, f.module, f.addr, f.size, f.id
     );
+}
+
+/// `CHAOS_GHIDRA_DIR`, else `./ghidra_out` if it exists.
+fn default_ghidra_dir() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("CHAOS_GHIDRA_DIR") {
+        let pb = std::path::PathBuf::from(p);
+        if pb.is_dir() {
+            return Some(pb);
+        }
+    }
+    let local = std::path::PathBuf::from("ghidra_out");
+    if local.is_dir() {
+        return Some(local);
+    }
+    None
+}
+
+/// `CHAOS_LOCAL_REPO`, else cwd if it looks like a decomp (has `nearmiss/` or `tools/match.py`).
+fn default_local_repo() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("CHAOS_LOCAL_REPO") {
+        let pb = std::path::PathBuf::from(p);
+        if pb.is_dir() {
+            return Some(pb);
+        }
+    }
+    let cwd = std::path::PathBuf::from(".");
+    if cwd.join("nearmiss").join("db.jsonl").is_file()
+        || cwd.join("tools").join("match.py").is_file()
+    {
+        return Some(cwd);
+    }
+    None
 }

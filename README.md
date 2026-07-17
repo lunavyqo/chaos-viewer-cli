@@ -38,8 +38,8 @@ Unpack and put `chaos` (or `chaos.exe`) on your `PATH`.
 - Overview: modules + functions on top, **detail pane** underneath; **`m`**
   filters all / unmatched only / matched only; **`s`** sorts modules (name,
   worst/best by unmatched left, most functions, most bytes)
-- **Heatmap** tab: view-only squarified byte treemap (same layout math as
-  chaos-viewer) — green matched / grey unmatched / yellow claimed
+- **Tools page (`5`)**: card catalog of typical decomp instruments (what each
+  does / changes); ★ when found under project `local_repo`
 - Priority lists: nearly done, best scaffolded, biggest unmatched
 - Prompt builder (batch, max 16) with clipboard copy, **`g`** / **`Shift+g`** to
   launch **Grok / Codex / Claude / Antigravity** in a separate terminal (set
@@ -87,7 +87,9 @@ chaos templates default short
 
 Prompt templates: [`docs/prompt-templates.md`](docs/prompt-templates.md). In the
 TUI Prompt page: **`t`** cycles, **`n`** new template, **`e`** edit current
-user template (`$EDITOR`/`nano`), **`Shift+t`** sets the default.
+user template (`$EDITOR`/`nano`), **`Shift+t`** sets the default. For
+experimental provenance, **`m`** opens the model picker; **`y`** / **`w`**
+cycle reasoning · harness (prefilled into `MATCH_RESULT`).
 
 ### Claims (optional, pluggable)
 
@@ -115,6 +117,11 @@ contract (so you can run **your own** coordinator or use someone else’s).
 See [`docs/schema.md`](docs/schema.md), [`docs/claims-api.md`](docs/claims-api.md),
 and upstream
 [ADAPTING.md](https://github.com/tangosdev/chaos-viewer/blob/master/ADAPTING.md).
+
+**System maps:**
+[`docs/architecture.md`](docs/architecture.md) (chaos-focused) ·
+[`docs/ecosystem.md`](docs/ecosystem.md) (full stack around a generic decomp
+repo: tools by role, ledgers, agents, web viewer).
 
 ## Development
 

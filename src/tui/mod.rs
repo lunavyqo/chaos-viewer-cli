@@ -2,8 +2,9 @@
 
 mod theme;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, stdout};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -25,24 +26,67 @@ use crate::conventions::Convention;
 use crate::discover::sources_equivalent;
 use crate::grok_launch::{launch_agent, resolve_repo_cwd, AgentKind, GrokLaunchMode, TerminalHost};
 use crate::load::{
-    details_base_from_source, load_chaos_db_opts, load_function_detail, DataSource, DetailCache,
+    details_base_from_source, ensure_module_chunk, load_chaos_db_opts, load_function_detail,
+    DataSource, DetailCache, DETAIL_PREWARM_CONCURRENCY,
 };
 use crate::prioritize::{priority_rows, PriorityMode};
 use crate::projects::{ProjectProfile, ProjectStore};
 use crate::prompt::{batch_max, PromptOptions};
 use crate::schema::{format_pct, ChaosDb, ChaosFunction, FunctionDetail, ProjectConfig};
-use crate::templates::{TemplateStore, BUILTIN_EXPERIMENTAL_ID, BUILTIN_ID};
-use crate::treemap::{layout_treemap, TreemapLeaf};
+use crate::templates::{TemplateStore, BUILTIN_EXPERIMENTAL_ID, BUILTIN_ID, PROVENANCE_MODELS};
+use crate::tools_catalog::{
+    filtered_indices, tool_found_path, tool_present, ToolCategory, TOOL_CARDS,
+};
 use theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Setup,
     Overview,
-    Heatmap,
     Priorities,
     Prompt,
     Claims,
+    /// Decomp instrument catalog (cards).
+    Tools,
+}
+
+/// Filter for the Tools page: all categories or one bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ToolsFilter {
+    #[default]
+    All,
+    Category(ToolCategory),
+}
+
+impl ToolsFilter {
+    fn label(self) -> String {
+        match self {
+            Self::All => "all".into(),
+            Self::Category(c) => c.label().into(),
+        }
+    }
+
+    fn cycle(self) -> Self {
+        match self {
+            Self::All => Self::Category(ToolCategory::Core),
+            Self::Category(c) => {
+                let next = c.cycle();
+                // After full cycle of categories, back to All.
+                if next == ToolCategory::Core && c == ToolCategory::Optional {
+                    Self::All
+                } else {
+                    Self::Category(next)
+                }
+            }
+        }
+    }
+
+    fn as_category(self) -> Option<ToolCategory> {
+        match self {
+            Self::All => None,
+            Self::Category(c) => Some(c),
+        }
+    }
 }
 
 /// Overview function list: which match states to show.
@@ -184,10 +228,10 @@ impl Screen {
     fn all_loaded() -> &'static [Screen] {
         &[
             Screen::Overview,
-            Screen::Heatmap,
             Screen::Priorities,
             Screen::Prompt,
             Screen::Claims,
+            Screen::Tools,
         ]
     }
 
@@ -196,10 +240,10 @@ impl Screen {
         match self {
             Screen::Setup => "Setup",
             Screen::Overview => "Overview",
-            Screen::Heatmap => "Heatmap",
             Screen::Priorities => "Priorities",
             Screen::Prompt => "Prompt",
             Screen::Claims => "Claims",
+            Screen::Tools => "Tools",
         }
     }
 
@@ -207,10 +251,10 @@ impl Screen {
     fn hotkey(self) -> Option<char> {
         match self {
             Screen::Overview => Some('1'),
-            Screen::Heatmap => Some('2'),
-            Screen::Priorities => Some('3'),
-            Screen::Prompt => Some('4'),
-            Screen::Claims => Some('5'),
+            Screen::Priorities => Some('2'),
+            Screen::Prompt => Some('3'),
+            Screen::Claims => Some('4'),
+            Screen::Tools => Some('5'),
             Screen::Setup => None,
         }
     }
@@ -252,6 +296,26 @@ fn paint_list_base(theme: &Theme) -> Style {
 fn fill_pane(f: &mut Frame, area: Rect, theme: &Theme, bg: Color) {
     f.render_widget(Clear, area);
     f.render_widget(Block::default().style(paint_on(theme.text, bg)), area);
+}
+
+/// ASCII case-insensitive substring check without allocating a lowercased haystack.
+///
+/// `needle` must already be lowercased (e.g. from `search.to_ascii_lowercase()`).
+fn contains_ignore_ascii_case(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    let h = haystack.as_bytes();
+    let n = needle_lower.as_bytes();
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|window| {
+        window
+            .iter()
+            .zip(n.iter())
+            .all(|(&a, &b)| a.to_ascii_lowercase() == b)
+    })
 }
 
 /// Standard content block: dark bg + border.
@@ -311,7 +375,16 @@ struct App {
     db: Option<ChaosDb>,
     source: Option<DataSource>,
     client: Client,
-    detail_cache: Option<DetailCache>,
+    /// Shared with background prewarm tasks (module detail chunks).
+    detail_cache: Option<Arc<DetailCache>>,
+    /// Modules currently being fetched/parsed in `tokio::spawn` workers.
+    detail_in_flight: Arc<Mutex<HashSet<String>>>,
+    /// Remaining modules to warm in the background (front = highest priority).
+    prewarm_queue: VecDeque<String>,
+    /// How many modules were queued for this atlas (progress denominator).
+    prewarm_total: usize,
+    /// True while the selected function's module chunk is still loading.
+    waiting_for_detail: bool,
     locked_by: HashMap<String, String>,
     claims_status: String,
     claims_count: usize,
@@ -351,6 +424,10 @@ struct App {
     template_store: TemplateStore,
     /// Active template id for Prompt / copy.
     prompt_template_id: String,
+    /// Attach stored near-miss / NONMATCHING C drafts to prompts (from details).
+    include_near_miss_draft: bool,
+    /// Attach Ghidra decompiler C to prompts when available (local ghidra_out / detail).
+    include_ghidra_draft: bool,
     /// When true, `template_name_input` is editing a new template id.
     naming_template: bool,
     template_name_input: String,
@@ -361,6 +438,15 @@ struct App {
     /// Centered agent picker (Prompt · Shift+g).
     agent_picker_open: bool,
     agent_picker_sel: usize,
+    /// Centered model picker (Prompt · m) for MATCH_RESULT prefill.
+    model_picker_open: bool,
+    model_picker_sel: usize,
+    /// Tools page: filtered catalog indices into TOOL_CARDS.
+    tools_filter: ToolsFilter,
+    tools_indices: Vec<usize>,
+    tools_sel: usize,
+    /// Scroll offset in card rows (each row = up to 2 cards).
+    tools_row_offset: usize,
     should_quit: bool,
 }
 
@@ -402,6 +488,10 @@ impl App {
             source: None,
             client,
             detail_cache: None,
+            detail_in_flight: Arc::new(Mutex::new(HashSet::new())),
+            prewarm_queue: VecDeque::new(),
+            prewarm_total: 0,
+            waiting_for_detail: false,
             locked_by: HashMap::new(),
             claims_status: "idle".into(),
             claims_count: 0,
@@ -433,6 +523,8 @@ impl App {
             prompt_text: String::new(),
             template_store: TemplateStore::load(),
             prompt_template_id: String::new(),
+            include_near_miss_draft: true,
+            include_ghidra_draft: true,
             naming_template: false,
             template_name_input: String::new(),
             pending_edit: None,
@@ -440,6 +532,12 @@ impl App {
             show_help: false,
             agent_picker_open: false,
             agent_picker_sel: 0,
+            model_picker_open: false,
+            model_picker_sel: 0,
+            tools_filter: ToolsFilter::All,
+            tools_indices: filtered_indices(None),
+            tools_sel: 0,
+            tools_row_offset: 0,
             should_quit: false,
         };
         app.prompt_template_id = app.template_store.default_id().to_string();
@@ -461,6 +559,22 @@ impl App {
                 KeyHint {
                     key: "d",
                     action: "set default",
+                },
+                KeyHint {
+                    key: "esc",
+                    action: "close",
+                },
+            ];
+        }
+        if self.model_picker_open {
+            return vec![
+                KeyHint {
+                    key: "j/k",
+                    action: "select model",
+                },
+                KeyHint {
+                    key: "enter",
+                    action: "use model",
                 },
                 KeyHint {
                     key: "esc",
@@ -643,7 +757,6 @@ impl App {
                     action: "clear batch",
                 },
             ],
-            Screen::Heatmap => Vec::new(),
             Screen::Priorities => vec![
                 KeyHint {
                     key: "j/k",
@@ -688,6 +801,26 @@ impl App {
                     action: "set default",
                 },
                 KeyHint {
+                    key: "m",
+                    action: "model picker",
+                },
+                KeyHint {
+                    key: "y",
+                    action: "cycle reasoning",
+                },
+                KeyHint {
+                    key: "w",
+                    action: "cycle harness",
+                },
+                KeyHint {
+                    key: "d",
+                    action: "toggle near-miss drafts",
+                },
+                KeyHint {
+                    key: "h",
+                    action: "toggle Ghidra draft",
+                },
+                KeyHint {
                     key: "c",
                     action: "copy",
                 },
@@ -708,6 +841,24 @@ impl App {
                 key: "r",
                 action: "refresh claims",
             }],
+            Screen::Tools => vec![
+                KeyHint {
+                    key: "j/k",
+                    action: "cards",
+                },
+                KeyHint {
+                    key: "h/l",
+                    action: "column",
+                },
+                KeyHint {
+                    key: "n",
+                    action: "filter category",
+                },
+                KeyHint {
+                    key: "r",
+                    action: "rescan local_repo",
+                },
+            ],
             Screen::Setup => Vec::new(),
         }
     }
@@ -719,7 +870,7 @@ GLOBAL
   ?           toggle this help
   q           quit
   tab / S-tab next / previous screen
-  1 2 3 4 5   Overview · Heatmap · Priorities · Prompt · Claims
+  1 2 3 4 5   Overview · Priorities · Prompt · Claims · Tools
   p           projects hub (switch / add / remove saved repos)
   u           update progress (re-fetch chaos-db; matches can land mid-session)
   r           refresh claims only
@@ -740,10 +891,6 @@ OVERVIEW
   b           toggle batch for selected function
   Shift+b     clear entire batch
 
-HEATMAP
-  view-only byte map (select a function on Overview / Priorities first)
-  green = matched · grey = unmatched · yellow = claimed · cyan = selected
-
 PRIORITIES
   n           cycle Nearly / Scaffolded / Biggest
   j / k       move in ranked list
@@ -757,11 +904,26 @@ PROMPT
   n           new template (copy of chaos-viewer → editor)
   e           edit current user template in $EDITOR / nano
   Shift+t     set current template as default
+  m           model picker (fixed list · j/k · enter select · esc close)
+  y           cycle reasoning / thinking level (high · medium · low · none)
+  w           cycle harness preset (grok-build · cursor-agent · claude-code · …)
+              model / reasoning / harness are saved in config.toml and prefilled
+              into experimental MATCH_RESULT so you do not retype them each try
+  d           toggle stored near-miss / NONMATCHING drafts in prompt (off = disasm only)
+  h           toggle Ghidra C draft in prompt (from local_repo/ghidra_out or details)
   c           copy batch prompt
   g           launch default coding agent (Grok/Codex/Claude/Antigravity)
   Shift+g     agent picker · enter launch · d set default · esc close
   Shift+b     clear entire batch
   experimental projects auto-select chaos-experimental when on chaos-viewer
+
+TOOLS
+  j / k       move selection among instrument cards
+  h / l       previous / next card (columns)
+  n           filter category (all · core · atlas · experimental · …)
+  r           rescan local_repo for which tools are present
+  Cards show purpose + what the tool changes (outputs / ledgers).
+  Green ★ = found under project local_repo · muted = not detected
 
 SETUP / PROJECTS
   type        source path / URL / GitHub (always works; focuses the input)
@@ -825,7 +987,7 @@ Press ? or esc to close help."#
             .await?
         };
         let base = details_base_from_source(&source);
-        self.detail_cache = Some(DetailCache::new(base));
+        self.replace_detail_cache(base);
         // Keep the *user* source for save/resume; discovery may set source to a raw JSON URL.
         self.load_input = Some(input.to_string());
         self.setup_input = input.to_string();
@@ -1119,7 +1281,7 @@ Press ? or esc to close help."#
             load_chaos_db_opts(&self.client, Some(&input), None, None, preferred, true).await?
         };
         let base = details_base_from_source(&source);
-        self.detail_cache = Some(DetailCache::new(base));
+        self.replace_detail_cache(base);
         self.load_input = Some(input);
         self.source = Some(source);
         self.remember_atlas_url_on_active();
@@ -1150,12 +1312,10 @@ Press ? or esc to close help."#
         }
 
         // Keep batch entries that still exist (matched/removed drop out).
-        if let Some(db) = &self.db {
-            self.batch = prev_batch
-                .into_iter()
-                .filter(|id| db.find_by_id(id).is_some())
-                .collect();
-        }
+        self.batch = prev_batch
+            .into_iter()
+            .filter(|id| self.id_index.contains_key(id))
+            .collect();
 
         self.rebuild_priorities();
         self.detail = None;
@@ -1163,14 +1323,14 @@ Press ? or esc to close help."#
             self.screen = prev_screen;
         }
         // Refresh detail for the selected function; rebuild prompt only here
-        // (not on every list move).
-        self.ensure_selected_detail().await;
+        // (not on every list move). Detail load is non-blocking (background).
+        self.ensure_selected_detail();
         self.rebuild_prompt().await;
         self.invalidate_detail_lines();
 
         if let Some(db) = &self.db {
             self.status = format!(
-                "Updated · {}/{} fn ({:.2}%) · batch {}/{}",
+                "Updated · {}/{} fn ({:.2}%) · batch {}/{} · warming details…",
                 db.stats.matched_functions,
                 db.stats.total_functions,
                 db.match_pct_functions(),
@@ -1191,18 +1351,178 @@ Press ? or esc to close help."#
         }
         self.rebuild_functions();
         self.rebuild_priorities();
-        self.ensure_selected_detail().await;
+        // Queue every module for gentle background prewarm (selected first).
+        self.queue_detail_prewarm();
+        self.ensure_selected_detail();
+        self.kick_detail_prewarm();
         self.rebuild_prompt().await;
         self.invalidate_detail_lines();
         if let Some(db) = &self.db {
             self.status = format!(
-                "Loaded {} · {}/{} fn ({:.2}%)",
+                "Loaded {} · {}/{} fn ({:.2}%) · warming details…",
                 db.project_name(),
                 db.stats.matched_functions,
                 db.stats.total_functions,
                 db.match_pct_functions(),
             );
         }
+    }
+
+    /// Drop any previous cache / in-flight set (atlas replaced).
+    fn replace_detail_cache(&mut self, base: String) {
+        self.detail_cache = Some(Arc::new(DetailCache::new(base)));
+        self.detail_in_flight = Arc::new(Mutex::new(HashSet::new()));
+        self.prewarm_queue.clear();
+        self.prewarm_total = 0;
+        self.waiting_for_detail = false;
+    }
+
+    /// Enqueue all known modules for background detail warm (selected + neighbors first).
+    fn queue_detail_prewarm(&mut self) {
+        self.prewarm_queue.clear();
+        let mut seen = HashSet::new();
+        let push = |m: &str, q: &mut VecDeque<String>, seen: &mut HashSet<String>| {
+            if m.is_empty() || !seen.insert(m.to_string()) {
+                return;
+            }
+            q.push_back(m.to_string());
+        };
+
+        // 1) Currently selected module (and nearby list neighbors).
+        if let Some(sel) = self.selected_module().map(str::to_string) {
+            push(&sel, &mut self.prewarm_queue, &mut seen);
+            if let Some(i) = self.module_list.iter().position(|m| m == &sel) {
+                if i > 0 {
+                    push(&self.module_list[i - 1], &mut self.prewarm_queue, &mut seen);
+                }
+                if i + 1 < self.module_list.len() {
+                    push(&self.module_list[i + 1], &mut self.prewarm_queue, &mut seen);
+                }
+            }
+        }
+        // 2) Rest of the module list in display order.
+        for m in &self.module_list {
+            push(m, &mut self.prewarm_queue, &mut seen);
+        }
+        // 3) Any module that appears in the atlas but was filtered out of the list.
+        if let Some(db) = &self.db {
+            for f in &db.functions {
+                push(&f.module, &mut self.prewarm_queue, &mut seen);
+            }
+        }
+        self.prewarm_total = self.prewarm_queue.len();
+    }
+
+    /// Move `module` to the front of the prewarm queue (user just opened it).
+    fn prioritize_detail_module(&mut self, module: &str) {
+        if module.is_empty() {
+            return;
+        }
+        self.prewarm_queue.retain(|m| m != module);
+        self.prewarm_queue.push_front(module.to_string());
+        if self.prewarm_total == 0 {
+            self.prewarm_total = 1;
+        }
+    }
+
+    /// Spawn background workers for pending module detail chunks (rate-limited).
+    ///
+    /// Does **not** block the UI. Cap concurrency so we never reintroduce the
+    /// old “download every details/*.json at once” storm.
+    fn kick_detail_prewarm(&mut self) {
+        let Some(cache) = self.detail_cache.clone() else {
+            return;
+        };
+        let in_flight = self.detail_in_flight.clone();
+        let client = self.client.clone();
+
+        loop {
+            let inflight_n = in_flight.lock().expect("in_flight").len();
+            if inflight_n >= DETAIL_PREWARM_CONCURRENCY {
+                break;
+            }
+
+            // Pop next module that still needs work.
+            let mut next: Option<String> = None;
+            while let Some(m) = self.prewarm_queue.pop_front() {
+                if cache.is_module_loaded(&m) {
+                    continue;
+                }
+                let mut guard = in_flight.lock().expect("in_flight");
+                if guard.contains(&m) {
+                    continue;
+                }
+                guard.insert(m.clone());
+                next = Some(m);
+                break;
+            }
+            let Some(module) = next else {
+                break;
+            };
+
+            let cache_bg = Arc::clone(&cache);
+            let in_flight_bg = Arc::clone(&in_flight);
+            let client_bg = client.clone();
+            tokio::spawn(async move {
+                let _ = ensure_module_chunk(&client_bg, &cache_bg, &module).await;
+                if let Ok(mut g) = in_flight_bg.lock() {
+                    g.remove(&module);
+                }
+            });
+        }
+    }
+
+    /// If a background prewarm finished for the current selection, apply it.
+    /// Returns true when the UI should repaint.
+    fn poll_detail_prewarm(&mut self) -> bool {
+        let mut dirty = false;
+
+        // Selected function's module became ready?
+        if self.waiting_for_detail && self.apply_detail_from_cache() {
+            self.waiting_for_detail = false;
+            dirty = true;
+            if let Some(m) = self.selected_function().map(|f| f.module.clone()) {
+                self.status = format!("Details ready · {m}");
+            }
+        } else if !self.waiting_for_detail {
+            // Even when not "waiting", j/k might have landed on a warm module —
+            // apply_detail_from_cache already handles hits; nothing to do.
+        }
+
+        // Keep the pipeline fed.
+        let before = self.prewarm_queue.len();
+        self.kick_detail_prewarm();
+
+        // Mild status while warming in the background (don't stomp active work msgs).
+        if let Some(cache) = &self.detail_cache {
+            let loaded = cache.loaded_module_count();
+            let total = self.prewarm_total.max(loaded);
+            let inflight = self.detail_in_flight.lock().map(|g| g.len()).unwrap_or(0);
+            if loaded < total || inflight > 0 || before > 0 {
+                // Only rewrite status when we're not mid user action message that
+                // already mentions batch/copy — keep it short for warming.
+                if self.waiting_for_detail {
+                    if let Some(m) = self.selected_function().map(|f| f.module.clone()) {
+                        self.status = format!("Loading details · {m}  (warmed {loaded}/{total})");
+                        dirty = true;
+                    }
+                } else if self.status.contains("warming details")
+                    || self.status.starts_with("Details warm")
+                    || self.status.starts_with("Loaded ")
+                    || self.status.starts_with("Updated ")
+                {
+                    self.status = format!("Details warm {loaded}/{total}");
+                    dirty = true;
+                }
+            } else if self.status.starts_with("Details warm")
+                || self.status.contains("warming details")
+            {
+                self.status = format!("Details ready · {loaded} modules cached");
+                dirty = true;
+            }
+        }
+
+        dirty
     }
 
     /// One linear pass: id → index and module → [function indices].
@@ -1358,12 +1678,18 @@ Press ? or esc to close help."#
         let prev_id = self.selected_id.clone();
 
         // Prefer per-module index (O(module size)) over scanning the whole atlas.
+        // Search: only lowercases the needle once; haystack uses ASCII case fold
+        // without allocating three full lowercase copies per function.
         let matches = |f: &ChaosFunction| {
-            filter.allows(f.matched)
-                && (q.is_empty()
-                    || f.name.to_ascii_lowercase().contains(&q)
-                    || f.module.to_ascii_lowercase().contains(&q)
-                    || f.id.to_ascii_lowercase().contains(&q))
+            if !filter.allows(f.matched) {
+                return false;
+            }
+            if q.is_empty() {
+                return true;
+            }
+            contains_ignore_ascii_case(&f.name, &q)
+                || contains_ignore_ascii_case(&f.module, &q)
+                || contains_ignore_ascii_case(&f.id, &q)
         };
         self.fn_list = if let Some(ref m) = module {
             self.module_index
@@ -1524,7 +1850,7 @@ Press ? or esc to close help."#
             }
         } else {
             lines.push(String::new());
-            lines.push("(detail loading… or no chunk for this module)".into());
+            lines.push("(loading module details in background… list stays navigable)".into());
         }
         lines
     }
@@ -1580,11 +1906,15 @@ Press ? or esc to close help."#
     }
 
     /// Fast path: use in-memory module chunk if present. No network.
+    ///
+    /// Returns `true` when the selection is fully handled (including “no function”
+    /// / “no cache”). Returns `false` when the module chunk is not loaded yet.
     fn apply_detail_from_cache(&mut self) -> bool {
         let (module, name) = {
             let Some(f) = self.selected_function() else {
                 self.detail = None;
                 self.invalidate_detail_lines();
+                self.waiting_for_detail = false;
                 return true;
             };
             (f.module.clone(), f.name.clone())
@@ -1592,44 +1922,54 @@ Press ? or esc to close help."#
         let Some(cache) = &self.detail_cache else {
             self.detail = None;
             self.invalidate_detail_lines();
+            self.waiting_for_detail = false;
             return true;
         };
         if let Some(det) = cache.get_if_module_loaded(&module, &name) {
             self.detail = det;
             self.invalidate_detail_lines();
+            self.waiting_for_detail = false;
             return true;
         }
         false
     }
 
-    /// Load detail for the current selection. Uses cache when possible (no await I/O).
+    /// Resolve detail for the current selection **without blocking the UI**.
+    ///
+    /// On a cache miss, prioritizes that module in the background prewarm queue
+    /// and shows a loading state. The event loop's idle tick applies the detail
+    /// once the chunk lands (see [`Self::poll_detail_prewarm`]).
+    ///
     /// Does **not** rebuild the batch prompt (that made j/k laggy).
-    async fn ensure_selected_detail(&mut self) {
+    fn ensure_selected_detail(&mut self) {
         if self.apply_detail_from_cache() {
             return;
         }
-        self.load_selected_detail().await;
-    }
-
-    async fn load_selected_detail(&mut self) {
-        let (module, name) = {
-            let Some(f) = self.selected_function() else {
-                self.detail = None;
-                self.invalidate_detail_lines();
-                return;
-            };
-            (f.module.clone(), f.name.clone())
-        };
-        let Some(cache) = &self.detail_cache else {
-            self.detail = None;
-            self.invalidate_detail_lines();
-            return;
-        };
-        match load_function_detail(&self.client, cache, &module, &name).await {
-            Ok(d) => self.detail = d,
-            Err(_) => self.detail = None,
-        }
+        let module = self
+            .selected_function()
+            .map(|f| f.module.clone())
+            .unwrap_or_default();
+        self.detail = None;
         self.invalidate_detail_lines();
+        self.waiting_for_detail = true;
+        if !module.is_empty() {
+            self.prioritize_detail_module(&module);
+            // Neighbors: pre-warm next/prev so h/l after this stays snappy.
+            if let Some(i) = self.module_list.iter().position(|m| m == &module) {
+                if i > 0 {
+                    self.prioritize_detail_module(&self.module_list[i - 1].clone());
+                    // keep current at front
+                    self.prioritize_detail_module(&module);
+                }
+                if i + 1 < self.module_list.len() {
+                    let n = self.module_list[i + 1].clone();
+                    self.prioritize_detail_module(&n);
+                    self.prioritize_detail_module(&module);
+                }
+            }
+            self.status = format!("Loading details · {module}");
+        }
+        self.kick_detail_prewarm();
     }
 
     fn project(&self) -> ProjectConfig {
@@ -1644,11 +1984,67 @@ Press ? or esc to close help."#
     /// An empty batch never falls back to the Overview cursor — that was
     /// surprising and made it look like a random function was "in the prompt".
     /// Add with `b` on Overview/Priorities/Detail first.
+    /// Prefer active project's `local_repo/ghidra_out`, then env, then `./ghidra_out`.
+    fn resolve_ghidra_dir(&self) -> Option<std::path::PathBuf> {
+        if let Ok(p) = std::env::var("CHAOS_GHIDRA_DIR") {
+            let pb = std::path::PathBuf::from(p);
+            if pb.is_dir() {
+                return Some(pb);
+            }
+        }
+        if let Some(id) = self.project_store.active_id.as_ref() {
+            if let Some(prof) = self.project_store.get(id) {
+                if let Some(repo) = prof.local_repo.as_ref() {
+                    let d = expand_user_path_tui(repo).join("ghidra_out");
+                    if d.is_dir() {
+                        return Some(d);
+                    }
+                }
+            }
+        }
+        let local = std::path::PathBuf::from("ghidra_out");
+        if local.is_dir() {
+            return Some(local);
+        }
+        None
+    }
+
+    fn resolve_local_repo(&self) -> Option<std::path::PathBuf> {
+        if let Ok(p) = std::env::var("CHAOS_LOCAL_REPO") {
+            let pb = expand_user_path_tui(&p);
+            if pb.is_dir() {
+                return Some(pb);
+            }
+        }
+        if let Some(id) = self.project_store.active_id.as_ref() {
+            if let Some(prof) = self.project_store.get(id) {
+                if let Some(repo) = prof.local_repo.as_ref() {
+                    let pb = expand_user_path_tui(repo);
+                    if pb.is_dir() {
+                        return Some(pb);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn prompt_opts(&self) -> PromptOptions {
+        PromptOptions {
+            claims_session: self.claims_session.clone(),
+            include_near_miss_draft: self.include_near_miss_draft,
+            include_ghidra_draft: self.include_ghidra_draft,
+            ghidra_dir: self.resolve_ghidra_dir(),
+            local_repo: self.resolve_local_repo(),
+            provenance_model: Some(self.template_store.provenance_model().to_string()),
+            provenance_reasoning: Some(self.template_store.provenance_reasoning().to_string()),
+            provenance_harness: Some(self.template_store.provenance_harness().to_string()),
+        }
+    }
+
     async fn rebuild_prompt(&mut self) {
         let project = self.project();
-        let opts = PromptOptions {
-            claims_session: self.claims_session.clone(),
-        };
+        let opts = self.prompt_opts();
         let Some(db) = &self.db else {
             self.prompt_text.clear();
             return;
@@ -1669,7 +2065,7 @@ Press ? or esc to close help."#
         if targets.is_empty() {
             self.prompt_text = "Batch is empty.\n\n\
 Add functions with b on Overview or Priorities \
-(max 16), then open Prompt (4) or press c to copy."
+(max 16), then open Prompt (3) or press c to copy."
                 .into();
             self.prompt_scroll = 0;
             return;
@@ -1677,8 +2073,9 @@ Add functions with b on Overview or Priorities \
 
         let mut items: Vec<(ChaosFunction, Option<FunctionDetail>)> = Vec::new();
         for f in targets {
-            let det = if let Some(cache) = &self.detail_cache {
-                load_function_detail(&self.client, cache, &f.module, &f.name)
+            let det = if let Some(cache) = self.detail_cache.clone() {
+                // Prompt/copy needs real detail — block here (batch ≤16).
+                load_function_detail(&self.client, cache.as_ref(), &f.module, &f.name)
                     .await
                     .ok()
                     .flatten()
@@ -1871,6 +2268,14 @@ Add functions with b on Overview or Priorities \
         self.status = "Agent picker · j/k select · enter launch · d set default · esc close".into();
     }
 
+    fn open_model_picker(&mut self) {
+        let cur = self.template_store.provenance_model();
+        self.model_picker_sel = crate::templates::provenance_model_index(cur).unwrap_or(0);
+        self.model_picker_open = true;
+        self.status =
+            "Model picker · j/k select · enter use · esc close · prefills MATCH_RESULT".into();
+    }
+
     /// Open the chosen coding agent in a **separate terminal** (chaos stays running).
     fn queue_agent_launch(&mut self, agent: AgentKind) {
         if self.batch.is_empty() {
@@ -1879,7 +2284,7 @@ Add functions with b on Overview or Priorities \
             return;
         }
         if self.prompt_text.trim().is_empty() {
-            self.status = "Prompt empty · open Prompt (4) first so it can rebuild".into();
+            self.status = "Prompt empty · open Prompt (3) first so it can rebuild".into();
             return;
         }
         let cfg = &self.template_store.config;
@@ -2038,6 +2443,59 @@ chaos projects local-repo <id> /path/to/decomp \
                         .unwrap_or_default();
                     self.rebuild_prompt().await;
                     self.queue_agent_launch(agent);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Model picker modal (Prompt · m)
+        if self.model_picker_open {
+            let n = PROVENANCE_MODELS.len();
+            match key {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.model_picker_open = false;
+                    self.status = "Model picker closed".into();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.model_picker_sel == 0 {
+                        self.model_picker_sel = n - 1;
+                    } else {
+                        self.model_picker_sel -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.model_picker_sel = (self.model_picker_sel + 1) % n;
+                }
+                KeyCode::PageUp => {
+                    self.model_picker_sel = self.model_picker_sel.saturating_sub(8);
+                }
+                KeyCode::PageDown => {
+                    self.model_picker_sel = (self.model_picker_sel + 8).min(n.saturating_sub(1));
+                }
+                KeyCode::Home => self.model_picker_sel = 0,
+                KeyCode::End => self.model_picker_sel = n.saturating_sub(1),
+                KeyCode::Enter => {
+                    let slug = PROVENANCE_MODELS
+                        .get(self.model_picker_sel)
+                        .map(|m| m.slug)
+                        .unwrap_or(PROVENANCE_MODELS[0].slug);
+                    match self.template_store.set_provenance_model(slug) {
+                        Ok(selected) => {
+                            let selected = selected.to_string();
+                            let label =
+                                crate::templates::provenance_model_label(&selected).to_string();
+                            self.model_picker_open = false;
+                            self.rebuild_prompt().await;
+                            self.status =
+                                format!("Model → {label} ({selected}) · y reasoning · w harness");
+                            self.error = None;
+                        }
+                        Err(e) => {
+                            self.error = Some(format!("{e:#}"));
+                            self.status = "Could not set model".into();
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -2379,22 +2837,23 @@ chaos projects local-repo <id> /path/to/decomp \
                 self.status = "Overview".into();
             }
             KeyCode::Char('2') => {
-                self.screen = Screen::Heatmap;
-                self.status = "Heatmap".into();
-            }
-            KeyCode::Char('3') => {
                 self.screen = Screen::Priorities;
                 self.rebuild_priorities();
                 self.status = format!("Priorities · {}", self.priority_mode.label());
             }
-            KeyCode::Char('4') => {
+            KeyCode::Char('3') => {
                 self.screen = Screen::Prompt;
                 self.rebuild_prompt().await;
                 self.status = "Prompt".into();
             }
-            KeyCode::Char('5') => {
+            KeyCode::Char('4') => {
                 self.screen = Screen::Claims;
                 self.status = format!("Claims · {}", self.claims_status);
+            }
+            KeyCode::Char('5') => {
+                self.screen = Screen::Tools;
+                self.refresh_tools_list();
+                self.status = self.tools_status_line();
             }
             KeyCode::Char('/') => {
                 self.searching = true;
@@ -2427,6 +2886,10 @@ chaos projects local-repo <id> /path/to/decomp \
                     self.status = "Update failed".into();
                 }
             }
+            KeyCode::Char('r') if self.screen == Screen::Tools => {
+                self.refresh_tools_list();
+                self.status = format!("{} · rescan", self.tools_status_line());
+            }
             KeyCode::Char('r') => {
                 if let Some(db) = self.db.clone() {
                     self.refresh_claims(&db).await;
@@ -2447,13 +2910,36 @@ chaos projects local-repo <id> /path/to/decomp \
                     self.priority_list.len()
                 );
             }
+            KeyCode::Char('n') if self.screen == Screen::Tools => {
+                self.tools_filter = self.tools_filter.cycle();
+                self.refresh_tools_list();
+                self.status = self.tools_status_line();
+            }
+            KeyCode::Char('h') if self.screen == Screen::Tools => {
+                self.move_tools_sel(-1);
+            }
+            KeyCode::Char('l') if self.screen == Screen::Tools => {
+                self.move_tools_sel(1);
+            }
+            KeyCode::Left if self.screen == Screen::Tools => {
+                self.move_tools_sel(-1);
+            }
+            KeyCode::Right if self.screen == Screen::Tools => {
+                self.move_tools_sel(1);
+            }
+            KeyCode::PageUp if self.screen == Screen::Tools => {
+                self.move_tools_sel(-4);
+            }
+            KeyCode::PageDown if self.screen == Screen::Tools => {
+                self.move_tools_sel(4);
+            }
             KeyCode::Char('m') if self.screen == Screen::Overview => {
                 self.match_filter = self.match_filter.cycle();
                 if let Some(db) = self.db.clone() {
                     self.rebuild_modules(&db);
                 }
                 self.rebuild_functions();
-                self.ensure_selected_detail().await;
+                self.ensure_selected_detail();
                 self.status = format!(
                     "Overview filter: {} ({} modules · {} functions)",
                     self.match_filter.label(),
@@ -2468,7 +2954,7 @@ chaos projects local-repo <id> /path/to/decomp \
                 }
                 // Keep the selected module if possible; functions stay for that module.
                 self.rebuild_functions();
-                self.ensure_selected_detail().await;
+                self.ensure_selected_detail();
                 self.status = format!(
                     "Module sort: {} ({} modules)",
                     self.module_sort.label(),
@@ -2477,6 +2963,66 @@ chaos projects local-repo <id> /path/to/decomp \
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1).await,
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1).await,
+            KeyCode::Char('d') if self.screen == Screen::Prompt => {
+                self.include_near_miss_draft = !self.include_near_miss_draft;
+                self.rebuild_prompt().await;
+                self.status = if self.include_near_miss_draft {
+                    "Near-miss drafts ON · stored NONMATCHING C included when present".into()
+                } else {
+                    "Near-miss drafts OFF · matching from disasm (and Ghidra if h on) only".into()
+                };
+            }
+            KeyCode::Char('h') if self.screen == Screen::Prompt => {
+                self.include_ghidra_draft = !self.include_ghidra_draft;
+                self.rebuild_prompt().await;
+                let dir = self.resolve_ghidra_dir();
+                self.status = if self.include_ghidra_draft {
+                    match dir {
+                        Some(p) => format!("Ghidra draft ON · {}", p.display()),
+                        None => {
+                            "Ghidra draft ON · no ghidra_out found (set local_repo or CHAOS_GHIDRA_DIR)"
+                                .into()
+                        }
+                    }
+                } else {
+                    "Ghidra draft OFF".into()
+                };
+            }
+            KeyCode::Char('m') if self.screen == Screen::Prompt => {
+                self.open_model_picker();
+            }
+            KeyCode::Char('y') if self.screen == Screen::Prompt => {
+                match self.template_store.cycle_provenance_reasoning(1) {
+                    Ok(level) => {
+                        let level = level.to_string();
+                        self.rebuild_prompt().await;
+                        self.status = format!(
+                            "Reasoning → {level}  (high · medium · low · none · prefills MATCH_RESULT)"
+                        );
+                        self.error = None;
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("{e:#}"));
+                        self.status = "Could not cycle reasoning".into();
+                    }
+                }
+            }
+            KeyCode::Char('w') if self.screen == Screen::Prompt => {
+                match self.template_store.cycle_provenance_harness(1) {
+                    Ok(harness) => {
+                        let harness = harness.to_string();
+                        self.rebuild_prompt().await;
+                        self.status = format!(
+                            "Harness → {harness}  (m model picker · y reasoning · prefills MATCH_RESULT)"
+                        );
+                        self.error = None;
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("{e:#}"));
+                        self.status = "Could not cycle harness".into();
+                    }
+                }
+            }
             KeyCode::Left | KeyCode::Char('h') if self.screen == Screen::Overview => {
                 self.apply_module_delta(-1).await;
             }
@@ -2497,7 +3043,7 @@ chaos projects local-repo <id> /path/to/decomp \
                             }
                             self.rebuild_functions();
                             self.screen = Screen::Overview;
-                            self.ensure_selected_detail().await;
+                            self.ensure_selected_detail();
                             self.status = "Overview · from priorities".into();
                         }
                     }
@@ -2587,17 +3133,82 @@ chaos projects local-repo <id> /path/to/decomp \
                 self.rebuild_priorities();
                 self.status = format!("Priorities · {}", self.priority_mode.label());
             }
-            Screen::Heatmap => {
-                self.status = "Heatmap".into();
-            }
             Screen::Claims => {
                 self.status = format!("Claims · {}", self.claims_status);
             }
             Screen::Overview => {
-                self.ensure_selected_detail().await;
+                self.ensure_selected_detail();
                 self.status = "Overview".into();
             }
+            Screen::Tools => {
+                self.refresh_tools_list();
+                self.status = self.tools_status_line();
+            }
             Screen::Setup => {}
+        }
+    }
+
+    fn active_local_repo(&self) -> Option<std::path::PathBuf> {
+        let id = self.project_store.active_id.as_ref()?;
+        let prof = self.project_store.get(id)?;
+        let repo = prof.local_repo.as_ref()?;
+        let p = expand_user_path_tui(repo);
+        if p.is_dir() {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
+    fn refresh_tools_list(&mut self) {
+        self.tools_indices = filtered_indices(self.tools_filter.as_category());
+        if self.tools_sel >= self.tools_indices.len() {
+            self.tools_sel = self.tools_indices.len().saturating_sub(1);
+        }
+        self.ensure_tools_scroll(6);
+    }
+
+    fn tools_status_line(&self) -> String {
+        let n = self.tools_indices.len();
+        let present = self
+            .active_local_repo()
+            .map(|repo| {
+                self.tools_indices
+                    .iter()
+                    .filter(|&&i| tool_present(&repo, &TOOL_CARDS[i]))
+                    .count()
+            })
+            .unwrap_or(0);
+        let repo_bit = match self.active_local_repo() {
+            Some(p) => format!("local_repo {}", p.display()),
+            None => "no local_repo (set r on projects)".into(),
+        };
+        format!(
+            "Tools · filter {} · {n} cards · {present} found · {repo_bit}",
+            self.tools_filter.label()
+        )
+    }
+
+    fn move_tools_sel(&mut self, delta: isize) {
+        if self.tools_indices.is_empty() {
+            return;
+        }
+        let n = self.tools_indices.len() as isize;
+        let i = self.tools_sel as isize + delta;
+        self.tools_sel = (((i % n) + n) % n) as usize;
+        self.ensure_tools_scroll(6);
+    }
+
+    fn ensure_tools_scroll(&mut self, visible_rows: usize) {
+        if self.tools_indices.is_empty() || visible_rows == 0 {
+            self.tools_row_offset = 0;
+            return;
+        }
+        let row = self.tools_sel / 2;
+        if row < self.tools_row_offset {
+            self.tools_row_offset = row;
+        } else if row >= self.tools_row_offset + visible_rows {
+            self.tools_row_offset = row + 1 - visible_rows;
         }
     }
 
@@ -2618,11 +3229,35 @@ chaos projects local-repo <id> /path/to/decomp \
         }
         self.move_module(delta);
         self.rebuild_functions();
-        self.ensure_selected_detail().await;
+        self.ensure_selected_detail();
     }
 
     async fn move_sel(&mut self, delta: isize) {
         match self.screen {
+            Screen::Tools => {
+                // j/k move by one card; two columns so Down goes to next row.
+                let step = if delta > 0 { 2 } else { -2 };
+                // Prefer vertical feel: j/k jump a row when possible.
+                let n = self.tools_indices.len() as isize;
+                if n == 0 {
+                    return;
+                }
+                let mut next = self.tools_sel as isize + step;
+                if next < 0 {
+                    next = (n - 1) - ((n - 1) % 2); // last row left card-ish
+                    if next >= n {
+                        next = n - 1;
+                    }
+                } else if next >= n {
+                    next = if delta > 0 { 0 } else { n - 1 };
+                }
+                // If stepped off the end of a short last row, clamp.
+                if next >= n {
+                    next = n - 1;
+                }
+                self.tools_sel = next as usize;
+                self.ensure_tools_scroll(6);
+            }
             Screen::Overview => {
                 if self.fn_list.is_empty() {
                     return;
@@ -2632,7 +3267,7 @@ chaos projects local-repo <id> /path/to/decomp \
                 let i = ((i % n) + n) % n;
                 self.fn_sel = i as usize;
                 self.sync_selection_from_fn();
-                self.ensure_selected_detail().await;
+                self.ensure_selected_detail();
             }
             Screen::Priorities => {
                 if self.priority_list.is_empty() {
@@ -2652,171 +3287,6 @@ chaos projects local-repo <id> /path/to/decomp \
             }
             _ => {}
         }
-    }
-
-    fn draw_heatmap(&mut self, f: &mut Frame, area: Rect) {
-        if self.db.is_none() {
-            return;
-        }
-
-        let title = " Heatmap ";
-        let block = content_block(title, &self.theme, self.theme.border);
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-        fill_pane(f, inner, &self.theme, self.theme.bg);
-
-        if inner.width < 4 || inner.height < 2 {
-            return;
-        }
-
-        // Map body + one-line legend for whatever is selected on other pages.
-        let map_h = inner.height.saturating_sub(1).max(1);
-        let map = Rect {
-            x: inner.x,
-            y: inner.y,
-            width: inner.width,
-            height: map_h,
-        };
-        let legend = Rect {
-            x: inner.x,
-            y: inner.y + map_h,
-            width: inner.width,
-            height: 1,
-        };
-
-        let leaves: Vec<TreemapLeaf> = self
-            .db
-            .as_ref()
-            .map(|db| db.functions.iter().map(TreemapLeaf::from).collect())
-            .unwrap_or_default();
-        let rects = layout_treemap(&leaves, map.width as f64, map.height as f64, None);
-
-        let selected_id = self.selected_id.clone();
-        let locked_ids: std::collections::HashSet<String> =
-            self.locked_by.keys().cloned().collect();
-        let batch = self.batch.clone();
-        let theme_bg = self.theme.bg;
-        let theme_panel = self.theme.panel;
-        let theme_text = self.theme.text;
-        let theme_muted = self.theme.muted;
-        let theme_accent = self.theme.accent;
-        let theme_matched = self.theme.matched;
-        let theme_unmatched = self.theme.unmatched;
-        let theme_claim = self.theme.claim;
-        let theme_batch = self.theme.batch;
-
-        let legend_text = if let Some(f) = selected_id
-            .as_ref()
-            .and_then(|id| self.db.as_ref().and_then(|db| db.find_by_id(id)))
-        {
-            let state = if f.matched {
-                "matched"
-            } else if locked_ids.contains(&f.id) {
-                "claimed"
-            } else {
-                "unmatched"
-            };
-            let batch_s = batch
-                .iter()
-                .position(|x| x == &f.id)
-                .map(|n| format!(" · [B{}]", n + 1))
-                .unwrap_or_default();
-            format!(
-                " {}  {}  0x{:x}  {}B  {state}{batch_s} ",
-                f.module, f.name, f.addr, f.size
-            )
-        } else {
-            " (select a function on Overview or Priorities) ".into()
-        };
-
-        let buf = f.buffer_mut();
-        let base = paint_on(theme_muted, theme_bg);
-        for row in 0..map.height {
-            for col in 0..map.width {
-                let cell = &mut buf[(map.x + col, map.y + row)];
-                cell.set_symbol(" ");
-                cell.set_style(base);
-            }
-        }
-
-        // Module chrome (panel fill + label).
-        for r in rects.iter().filter(|r| r.is_module) {
-            if let Some((cx, cy, cw, ch)) = r.cell_bounds(map.width, map.height) {
-                let style = paint_on(theme_muted, theme_panel);
-                for row in 0..ch {
-                    for col in 0..cw {
-                        let cell = &mut buf[(map.x + cx + col, map.y + cy + row)];
-                        cell.set_symbol(" ");
-                        cell.set_style(style);
-                    }
-                }
-                if let Some(label) = &r.module_label {
-                    if ch >= 1 && cw >= 4 {
-                        let text: String = label.chars().take(cw as usize).collect();
-                        let line =
-                            Line::from(Span::styled(text, paint_bold_on(theme_text, theme_panel)));
-                        buf.set_line(map.x + cx, map.y + cy, &line, cw);
-                    }
-                }
-            }
-        }
-
-        // Functions: block glyphs from the first heatmap (not braille).
-        for r in rects.iter().filter(|r| !r.is_module) {
-            let Some((cx, cy, cw, ch)) = r.cell_bounds(map.width, map.height) else {
-                continue;
-            };
-            let is_sel = selected_id.as_deref() == Some(r.id.as_str());
-            let is_locked = locked_ids.contains(&r.id);
-            let is_batch = batch.iter().any(|x| x == &r.id);
-            let (fg, bg) = if is_sel {
-                (theme_bg, theme_accent)
-            } else if is_locked {
-                (theme_bg, theme_claim)
-            } else if is_batch {
-                (theme_text, theme_batch)
-            } else if r.matched {
-                (theme_bg, theme_matched)
-            } else {
-                (theme_text, theme_unmatched)
-            };
-            let style = if is_sel {
-                paint_bold_on(fg, bg)
-            } else {
-                paint_on(fg, bg)
-            };
-            let sym = if is_sel {
-                "█"
-            } else if r.matched {
-                "▓"
-            } else if is_locked {
-                "▒"
-            } else {
-                "░"
-            };
-            for row in 0..ch {
-                for col in 0..cw {
-                    let cell = &mut buf[(map.x + cx + col, map.y + cy + row)];
-                    cell.set_symbol(sym);
-                    cell.set_style(style);
-                }
-            }
-        }
-
-        let leg_style = paint_on(theme_text, theme_panel);
-        for col in 0..legend.width {
-            let cell = &mut buf[(legend.x + col, legend.y)];
-            cell.set_symbol(" ");
-            cell.set_style(leg_style);
-        }
-        let line = Line::from(Span::styled(
-            legend_text
-                .chars()
-                .take(legend.width as usize)
-                .collect::<String>(),
-            paint_on(theme_text, theme_panel),
-        ));
-        buf.set_line(legend.x, legend.y, &line, legend.width);
     }
 
     fn draw(&mut self, f: &mut Frame) {
@@ -2843,15 +3313,18 @@ chaos projects local-repo <id> /path/to/decomp \
         match self.screen {
             Screen::Setup => self.draw_setup(f, chunks[1]),
             Screen::Overview => self.draw_overview(f, chunks[1]),
-            Screen::Heatmap => self.draw_heatmap(f, chunks[1]),
             Screen::Priorities => self.draw_priorities(f, chunks[1]),
             Screen::Prompt => self.draw_prompt(f, chunks[1]),
             Screen::Claims => self.draw_claims(f, chunks[1]),
+            Screen::Tools => self.draw_tools(f, chunks[1]),
         }
         self.draw_footer(f, chunks[2]);
 
         if self.agent_picker_open {
             self.draw_agent_picker_overlay(f, area);
+        }
+        if self.model_picker_open {
+            self.draw_model_picker_overlay(f, area);
         }
         if self.show_help {
             self.draw_help_overlay(f, area);
@@ -2910,6 +3383,86 @@ chaos projects local-repo <id> /path/to/decomp \
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  needs local_repo · batch not empty",
+            paint_on(self.theme.muted, bg),
+        )));
+
+        f.render_widget(
+            Paragraph::new(lines)
+                .style(paint_on(self.theme.text, bg))
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
+    }
+
+    fn draw_model_picker_overlay(&self, f: &mut Frame, area: Rect) {
+        let n = PROVENANCE_MODELS.len();
+        let w = area.width.saturating_sub(8).min(52);
+        // Header + list rows + footer; cap so short terminals still fit.
+        let h = area
+            .height
+            .saturating_sub(4)
+            .min((n as u16).saturating_add(5).min(24));
+        let x = area.x + (area.width.saturating_sub(w)) / 2;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        let rect = Rect::new(x, y, w, h);
+        let bg = self.theme.panel;
+        let current = self.template_store.provenance_model();
+
+        f.render_widget(Clear, rect);
+
+        let title = format!(
+            " model  ·  current: {}  ·  enter select ",
+            self.template_store.provenance_model_label()
+        );
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(paint_on(self.theme.accent, bg))
+            .style(paint_on(self.theme.text, bg));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        fill_pane(f, inner, &self.theme, bg);
+
+        // Visible window of models (scroll with selection).
+        let header_lines: u16 = 2; // hint + blank
+        let footer_lines: u16 = 2; // blank + note
+        let list_h = inner
+            .height
+            .saturating_sub(header_lines + footer_lines)
+            .max(1) as usize;
+        let sel = self.model_picker_sel.min(n.saturating_sub(1));
+        let mut start = sel.saturating_sub(list_h.saturating_sub(1) / 2);
+        if start + list_h > n {
+            start = n.saturating_sub(list_h);
+        }
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            "  j/k · pgup/pgdn · enter use · esc",
+            paint_on(self.theme.muted, bg),
+        )));
+        lines.push(Line::from(""));
+        for (i, model) in PROVENANCE_MODELS
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(list_h)
+        {
+            let selected = i == sel;
+            let is_cur = model.slug == current;
+            let mark = if selected { "›" } else { " " };
+            let star = if is_cur { "★" } else { " " };
+            let row = format!(" {mark} {star} {:<20}  {}", model.label, model.slug);
+            let style = if selected {
+                paint_bold_on(self.theme.accent, bg)
+            } else {
+                paint_on(self.theme.text, bg)
+            };
+            lines.push(Line::from(Span::styled(row, style)));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  prefills matchProvenance.model  ·  {}/{}", sel + 1, n),
             paint_on(self.theme.muted, bg),
         )));
 
@@ -3587,9 +4140,22 @@ chaos projects local-repo <id> /path/to/decomp \
             )
         } else {
             format!(
-                " Prompt  ·  {}  ·  batch {}  ·  t · n new · e edit · S-t default · c ",
+                " Prompt  ·  {}  ·  batch {}  ·  {}/{}  {}  ·  drafts:{}  Ghidra:{}  ·  m y w · d · h · t · c ",
                 self.prompt_template_label(),
-                self.batch_summary()
+                self.batch_summary(),
+                self.template_store.provenance_model(),
+                self.template_store.provenance_reasoning(),
+                self.template_store.provenance_harness(),
+                if self.include_near_miss_draft {
+                    "on"
+                } else {
+                    "off"
+                },
+                if self.include_ghidra_draft {
+                    "on"
+                } else {
+                    "off"
+                },
             )
         };
         let border = if self.batch.is_empty() {
@@ -3660,6 +4226,182 @@ chaos projects local-repo <id> /path/to/decomp \
             inner,
         );
     }
+
+    fn draw_tools(&self, f: &mut Frame, area: Rect) {
+        let bg = self.theme.bg;
+        let repo = self.active_local_repo();
+        let title = format!(
+            " Tools  ·  {}  ·  n filter  ·  ★ in local_repo ",
+            self.tools_filter.label()
+        );
+        let block = content_block(title.as_str(), &self.theme, self.theme.border);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        fill_pane(f, inner, &self.theme, bg);
+
+        if self.tools_indices.is_empty() {
+            f.render_widget(
+                Paragraph::new("No tools in this filter.").style(paint_on(self.theme.muted, bg)),
+                inner,
+            );
+            return;
+        }
+
+        // Header strip: repo path
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(3)])
+            .split(inner);
+        let repo_line = match &repo {
+            Some(p) => format!("local_repo: {}", p.display()),
+            None => "local_repo: (not set — project hub r · cards still show catalog)".into(),
+        };
+        f.render_widget(
+            Paragraph::new(repo_line).style(paint_on(self.theme.muted, bg)),
+            chunks[0],
+        );
+
+        let grid = chunks[1];
+        // Card size: 2 columns, ~7 rows tall each.
+        const CARD_H: u16 = 7;
+        const COLS: usize = 2;
+        let rows_fit = (grid.height / CARD_H).max(1) as usize;
+        // Keep scroll in range for this height (draw-only clamp).
+        let total_rows = self.tools_indices.len().div_ceil(COLS);
+        let max_off = total_rows.saturating_sub(rows_fit);
+        let row_off = self.tools_row_offset.min(max_off);
+
+        let start = row_off * COLS;
+        let end = (start + rows_fit * COLS).min(self.tools_indices.len());
+        let visible = &self.tools_indices[start..end];
+
+        let n_vis_rows = visible.len().div_ceil(COLS).max(1);
+        let row_constraints: Vec<Constraint> = (0..n_vis_rows)
+            .map(|_| Constraint::Length(CARD_H))
+            .collect();
+        let row_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(row_constraints)
+            .split(grid);
+
+        for (r, row_area) in row_layout.iter().enumerate() {
+            let left_i = r * COLS;
+            let right_i = left_i + 1;
+            let col_layout = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(*row_area);
+
+            if let Some(&card_idx) = visible.get(left_i) {
+                let sel = start + left_i == self.tools_sel;
+                self.draw_tool_card(f, col_layout[0], card_idx, sel, repo.as_deref());
+            }
+            if let Some(&card_idx) = visible.get(right_i) {
+                let sel = start + right_i == self.tools_sel;
+                self.draw_tool_card(f, col_layout[1], card_idx, sel, repo.as_deref());
+            }
+        }
+    }
+
+    fn draw_tool_card(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        card_idx: usize,
+        selected: bool,
+        repo: Option<&std::path::Path>,
+    ) {
+        let card = &TOOL_CARDS[card_idx];
+        let bg = self.theme.panel;
+        let present = repo.is_some_and(|r| tool_present(r, card));
+        let border = if selected {
+            self.theme.accent
+        } else if present {
+            self.theme.matched
+        } else {
+            self.theme.border
+        };
+        let star = if present { "★" } else { " " };
+        let title = format!(" {star} {} · {} ", card.name, card.category.label());
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(paint_on(border, bg))
+            .style(paint_on(self.theme.text, bg));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        fill_pane(f, inner, &self.theme, bg);
+
+        let path_bit = repo
+            .and_then(|r| tool_found_path(r, card))
+            .map(|p| {
+                // Prefer path relative to repo when possible.
+                repo.and_then(|root| {
+                    p.strip_prefix(root)
+                        .ok()
+                        .map(|rel| rel.display().to_string())
+                })
+                .unwrap_or_else(|| p.display().to_string())
+            })
+            .unwrap_or_else(|| card.detect.first().copied().unwrap_or("—").to_string());
+
+        let lines = vec![
+            Line::from(Span::styled(
+                truncate_for_card(card.summary, inner.width),
+                if selected {
+                    paint_bold_on(self.theme.text, bg)
+                } else {
+                    paint_on(self.theme.text, bg)
+                },
+            )),
+            Line::from(Span::styled(
+                truncate_for_card(&format!("changes: {}", card.changes), inner.width),
+                paint_on(self.theme.muted, bg),
+            )),
+            Line::from(Span::styled(
+                truncate_for_card(
+                    &format!(
+                        "{}  {}",
+                        if present { "found" } else { "missing" },
+                        path_bit
+                    ),
+                    inner.width,
+                ),
+                paint_on(
+                    if present {
+                        self.theme.matched
+                    } else {
+                        self.theme.muted
+                    },
+                    bg,
+                ),
+            )),
+        ];
+        f.render_widget(
+            Paragraph::new(lines)
+                .style(paint_on(self.theme.text, bg))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+    }
+}
+
+fn truncate_for_card(s: &str, width: u16) -> String {
+    let w = width as usize;
+    if w == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i + 1 >= w {
+            if w > 1 {
+                out.push('…');
+            }
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Run the interactive TUI. Optional initial input loads immediately.
@@ -3726,80 +4468,113 @@ async fn run_loop(
     terminal: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
+    // Event-driven redraw. Only paint after input/resize/state changes (no free-spin).
+    //
+    // Idle ticks (~200 ms) still run so background detail prewarm can apply
+    // finished module chunks without blocking key handling.
+    let mut dirty = true;
     loop {
-        terminal.draw(|f| app.draw(f))?;
-        if event::poll(Duration::from_millis(16))? {
+        if dirty {
+            terminal.draw(|f| app.draw(f))?;
+            dirty = false;
+        }
+
+        // Block until input (or a short idle tick for prewarm progress).
+        if !event::poll(Duration::from_millis(200))? {
+            if app.should_quit {
+                break;
+            }
+            // Background detail chunks finished? Apply + keep prewarm pipeline fed.
+            if app.poll_detail_prewarm() {
+                dirty = true;
+            }
+            // No events — stay idle aside from prewarm. Editor handoff below only
+            // after keys set `pending_edit`.
+            if app.pending_edit.is_none() {
+                continue;
+            }
+        } else {
+            dirty = true;
             // Drain the queue. Coalesce rapid list nav so holding a key only
-            // pays one selection update (+ one detail load) per frame.
+            // pays one selection update (+ one detail load) per paint.
             let mut nav_delta: isize = 0;
             let mut mod_delta: isize = 0;
             let mut other_keys: Vec<KeyEvent> = Vec::new();
-            while event::poll(Duration::from_millis(0))? {
+            // Process the event that made poll return true, then drain the rest.
+            loop {
                 match event::read()? {
                     Event::Key(key) => {
                         if key.kind == KeyEventKind::Release {
-                            continue;
-                        }
-                        let code = match key.code {
-                            KeyCode::Char(c) => KeyCode::Char(c.to_ascii_lowercase()),
-                            other => other,
-                        };
-                        let overview_idle = app.screen == Screen::Overview
-                            && !app.searching
-                            && !app.naming_template
-                            && !app.show_help
-                            && !app.agent_picker_open;
-                        let list_idle = matches!(
-                            app.screen,
-                            Screen::Overview | Screen::Priorities | Screen::Prompt
-                        ) && !app.searching
-                            && !app.naming_template
-                            && !app.show_help
-                            && !app.agent_picker_open;
-                        if list_idle
-                            && matches!(
-                                code,
-                                KeyCode::Char('j')
-                                    | KeyCode::Char('k')
-                                    | KeyCode::Up
-                                    | KeyCode::Down
-                            )
-                        {
-                            match code {
-                                KeyCode::Char('j') | KeyCode::Down => nav_delta += 1,
-                                KeyCode::Char('k') | KeyCode::Up => nav_delta -= 1,
-                                _ => {}
-                            }
-                        } else if overview_idle
-                            && matches!(
-                                code,
-                                KeyCode::Char('h')
-                                    | KeyCode::Char('l')
-                                    | KeyCode::Left
-                                    | KeyCode::Right
-                            )
-                        {
-                            // Module list: coalesce h/l so holding the key is not O(n) rebuilds.
-                            match code {
-                                KeyCode::Char('l') | KeyCode::Right => mod_delta += 1,
-                                KeyCode::Char('h') | KeyCode::Left => mod_delta -= 1,
-                                _ => {}
-                            }
+                            // fall through to drain check
                         } else {
-                            // Flush pending nav before other keys so order stays sane.
-                            if nav_delta != 0 {
-                                app.move_sel(nav_delta).await;
-                                nav_delta = 0;
+                            let code = match key.code {
+                                KeyCode::Char(c) => KeyCode::Char(c.to_ascii_lowercase()),
+                                other => other,
+                            };
+                            let overview_idle = app.screen == Screen::Overview
+                                && !app.searching
+                                && !app.naming_template
+                                && !app.show_help
+                                && !app.agent_picker_open
+                                && !app.model_picker_open;
+                            let list_idle = matches!(
+                                app.screen,
+                                Screen::Overview | Screen::Priorities | Screen::Prompt
+                            ) && !app.searching
+                                && !app.naming_template
+                                && !app.show_help
+                                && !app.agent_picker_open
+                                && !app.model_picker_open;
+                            if list_idle
+                                && matches!(
+                                    code,
+                                    KeyCode::Char('j')
+                                        | KeyCode::Char('k')
+                                        | KeyCode::Up
+                                        | KeyCode::Down
+                                )
+                            {
+                                match code {
+                                    KeyCode::Char('j') | KeyCode::Down => nav_delta += 1,
+                                    KeyCode::Char('k') | KeyCode::Up => nav_delta -= 1,
+                                    _ => {}
+                                }
+                            } else if overview_idle
+                                && matches!(
+                                    code,
+                                    KeyCode::Char('h')
+                                        | KeyCode::Char('l')
+                                        | KeyCode::Left
+                                        | KeyCode::Right
+                                )
+                            {
+                                // Module list: coalesce h/l so holding the key is not O(n) rebuilds.
+                                match code {
+                                    KeyCode::Char('l') | KeyCode::Right => mod_delta += 1,
+                                    KeyCode::Char('h') | KeyCode::Left => mod_delta -= 1,
+                                    _ => {}
+                                }
+                            } else {
+                                // Flush pending nav before other keys so order stays sane.
+                                if nav_delta != 0 {
+                                    app.move_sel(nav_delta).await;
+                                    nav_delta = 0;
+                                }
+                                if mod_delta != 0 {
+                                    app.apply_module_delta(mod_delta).await;
+                                    mod_delta = 0;
+                                }
+                                other_keys.push(key);
                             }
-                            if mod_delta != 0 {
-                                app.apply_module_delta(mod_delta).await;
-                                mod_delta = 0;
-                            }
-                            other_keys.push(key);
                         }
                     }
-                    Event::Resize(_, _) => {}
+                    Event::Resize(_, _) => {
+                        // Redraw with new size (dirty already set above).
+                    }
                     _ => {}
+                }
+                if !event::poll(Duration::from_millis(0))? {
+                    break;
                 }
             }
             if nav_delta != 0 {
@@ -3810,6 +4585,10 @@ async fn run_loop(
             }
             for key in other_keys {
                 app.on_key(key).await;
+            }
+            // Prewarm may have finished during key handling; also feed the queue.
+            if app.poll_detail_prewarm() {
+                dirty = true;
             }
         }
 
@@ -3840,6 +4619,7 @@ async fn run_loop(
                     app.status = format!("File left at {}", path.display());
                 }
             }
+            dirty = true;
         }
 
         if app.should_quit {
@@ -3852,6 +4632,16 @@ async fn run_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contains_ignore_ascii_case_basic() {
+        // needle must already be lowercased (search box lowercases once).
+        assert!(contains_ignore_ascii_case("FooBar", "foo"));
+        assert!(contains_ignore_ascii_case("FooBar", "obar"));
+        assert!(contains_ignore_ascii_case("Arm9", "arm"));
+        assert!(!contains_ignore_ascii_case("arm9", "arm10"));
+        assert!(contains_ignore_ascii_case("x", ""));
+    }
 
     fn stats(pairs: &[(&str, usize, usize, u64)]) -> HashMap<String, ModuleAgg> {
         pairs
