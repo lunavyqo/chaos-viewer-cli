@@ -1330,10 +1330,13 @@ Press ? or esc to close help."#
 
         if let Some(db) = &self.db {
             self.status = format!(
-                "Updated · {}/{} fn ({:.2}%) · batch {}/{} · warming details…",
+                "Updated · {}/{} fn ({:.2}%) · {}/{} B ({:.2}%) · batch {}/{} · warming details…",
                 db.stats.matched_functions,
                 db.stats.total_functions,
                 db.match_pct_functions(),
+                db.stats.matched_bytes,
+                db.stats.total_bytes,
+                db.match_pct_bytes(),
                 self.batch.len(),
                 crate::prompt::batch_max(),
             );
@@ -1359,11 +1362,14 @@ Press ? or esc to close help."#
         self.invalidate_detail_lines();
         if let Some(db) = &self.db {
             self.status = format!(
-                "Loaded {} · {}/{} fn ({:.2}%) · warming details…",
+                "Loaded {} · {}/{} fn ({:.2}%) · {}/{} B ({:.2}%) · warming details…",
                 db.project_name(),
                 db.stats.matched_functions,
                 db.stats.total_functions,
                 db.match_pct_functions(),
+                db.stats.matched_bytes,
+                db.stats.total_bytes,
+                db.match_pct_bytes(),
             );
         }
     }
@@ -3537,10 +3543,13 @@ chaos projects local-repo <id> /path/to/decomp \
                 None => format!("{atlas} [{conv}]"),
             };
             format!(
-                " chaos  ·  {proj}  ·  {}/{} fn ({}%)  ·  {batch_bit}  ·  gen {gen}  ·  p projects",
+                " chaos  ·  {proj}  ·  {}/{} fn ({}%)  ·  {}/{} B ({}%)  ·  {batch_bit}  ·  gen {gen}  ·  p projects",
                 db.stats.matched_functions,
                 db.stats.total_functions,
                 format_pct(db.stats.matched_functions, db.stats.total_functions),
+                db.stats.matched_bytes,
+                db.stats.total_bytes,
+                format_pct(db.stats.matched_bytes, db.stats.total_bytes),
             )
         } else {
             " chaos  ·  Chaos Viewer CLI  ·  projects hub  ·  press ? for help".into()
