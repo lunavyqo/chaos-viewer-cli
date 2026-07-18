@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **TUI header progress** now shows both function and byte match meters
+  (`matched/total fn (%)` and `matched/total B (%)`), matching `chaos stats`.
+  Load / update status lines include the same pair.
+
 - **Experimental attempt logging** is an **attempt tree**, not a flat diary:
   `MATCH_RESULT` requires tree links (`parentAttemptId`, `base`) plus **stable
   identity**: `schemaVersion`, atlas `functionId`, unique `attemptId`
