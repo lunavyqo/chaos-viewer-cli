@@ -89,8 +89,9 @@ pub const TOOL_CARDS: &[ToolCard] = &[
     ToolCard {
         name: "bank.py",
         category: ToolCategory::Core,
-        summary: "Record a successful match with required provenance / credit.",
-        changes: "Final ledger row + often stamps how/who; may require verify first.",
+        summary: "Promote a verified match (src + credit). NOT a new try.",
+        changes: "Final ledger / src promote. May stamp how (EP) or only fan-out \
+verify (SM64DS) — use stamp_provenance when bank does not stamp how.",
         detect: &["tools/bank.py"],
     },
     ToolCard {
@@ -103,9 +104,18 @@ pub const TOOL_CARDS: &[ToolCard] = &[
     ToolCard {
         name: "log_attempt.py",
         category: ToolCategory::Experimental,
-        summary: "Append one attempt-tree node (any status, including dead ends).",
-        changes: "Appends config/match_attempts.jsonl (or equivalent attempt log).",
+        summary: "REQUIRED after every try: append attempt-tree node (any status).",
+        changes: "Appends config/match_attempts.jsonl. matched only after verify; \
+near_miss when tip improves; else no_progress. No wall-clock times.",
         detect: &["tools/log_attempt.py"],
+    },
+    ToolCard {
+        name: "stamp_provenance.py",
+        category: ToolCategory::Experimental,
+        summary: "On MATCH: stamp final how (model / reasoning / harness).",
+        changes: "Writes match_provenance.jsonl how-row. NOT a new try; does not \
+replace log_attempt. Prefer when bank is fan-out only.",
+        detect: &["tools/stamp_provenance.py"],
     },
     ToolCard {
         name: "match_attempts.py",

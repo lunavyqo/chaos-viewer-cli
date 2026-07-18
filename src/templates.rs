@@ -182,8 +182,7 @@ pub const PROVENANCE_MODELS: &[ProvenanceModel] = &[
 
 /// Fixed reasoning levels for experimental prompts (cycle with **`y`** on Prompt).
 /// Highest effort first: max > xhigh > high > medium > low > none.
-pub const PROVENANCE_REASONING_LEVELS: &[&str] =
-    &["max", "xhigh", "high", "medium", "low", "none"];
+pub const PROVENANCE_REASONING_LEVELS: &[&str] = &["max", "xhigh", "high", "medium", "low", "none"];
 
 /// Fixed harness presets (cycle with **`w`** on Prompt).
 pub const PROVENANCE_HARNESS_PRESETS: &[&str] = &[
