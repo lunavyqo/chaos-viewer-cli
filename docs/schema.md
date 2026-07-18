@@ -135,3 +135,5 @@ When given a GitHub repo URL, the CLI probes (first hit wins):
 - **Best scaffolded:** unmatched, not claimed, `sim` set, no `floor`; sort by
   `sim` desc; top 25.
 - **Biggest:** unmatched, not claimed, no `floor`; sort by `size` desc; top 25.
+- **Smallest:** unmatched, not claimed, no `floor`; sort by `size` asc; top 25
+  (whole-repo smallest open functions).

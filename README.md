@@ -40,7 +40,7 @@ Unpack and put `chaos` (or `chaos.exe`) on your `PATH`.
   worst/best by unmatched left, most functions, most bytes)
 - **Tools page (`5`)**: card catalog of typical decomp instruments (what each
   does / changes); ★ when found under project `local_repo`
-- Priority lists: nearly done, best scaffolded, biggest unmatched
+- Priority lists: nearly done, best scaffolded, biggest / smallest unmatched
 - Prompt builder (batch, max 16) with clipboard copy, **`g`** / **`Shift+g`** to
   launch **Grok / Codex / Claude / Antigravity** in a separate terminal (set
   `local_repo` per project; default agent configurable), and **`Shift+b`** clear

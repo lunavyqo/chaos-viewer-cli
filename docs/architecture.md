@@ -117,7 +117,7 @@ flowchart LR
 | `schema` | Atlas types (`ChaosFunction`, `matchProvenance`, …) |
 | `projects` | Saved multi-repo profiles + convention + `local_repo` |
 | `conventions` | default vs experimental tracking rules |
-| `prioritize` | Nearly / scaffolded / biggest lists |
+| `prioritize` | Nearly / scaffolded / biggest / smallest lists |
 | `prompt` | Built-in prompt bodies (viewer + experimental) |
 | `templates` | User TOML templates + `config.toml` + provenance pickers |
 | `claims` | Optional lock list / try-lock session |

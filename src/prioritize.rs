@@ -9,6 +9,7 @@ pub enum PriorityMode {
     Nearly,
     Scaffolded,
     Biggest,
+    Smallest,
 }
 
 impl PriorityMode {
@@ -17,6 +18,7 @@ impl PriorityMode {
             Self::Nearly => "nearly",
             Self::Scaffolded => "scaffolded",
             Self::Biggest => "biggest",
+            Self::Smallest => "smallest",
         }
     }
 
@@ -25,6 +27,7 @@ impl PriorityMode {
             "nearly" | "near" | "near-miss" => Some(Self::Nearly),
             "scaffolded" | "scaffold" | "sim" => Some(Self::Scaffolded),
             "biggest" | "bytes" | "size" => Some(Self::Biggest),
+            "smallest" | "small" | "tiny" => Some(Self::Smallest),
             _ => None,
         }
     }
@@ -34,6 +37,7 @@ impl PriorityMode {
             Self::Nearly => "Nearly done",
             Self::Scaffolded => "Best scaffolded",
             Self::Biggest => "Biggest bytes",
+            Self::Smallest => "Smallest functions",
         }
     }
 }
@@ -75,6 +79,12 @@ pub fn priority_rows<'a>(
         PriorityMode::Biggest => {
             un.retain(|f| f.floor.is_none());
             un.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
+        }
+        PriorityMode::Smallest => {
+            // Same filters as Biggest: open work only, no floor parking.
+            // Whole-repo ranking by size ascending (quick wins / easy targets).
+            un.retain(|f| f.floor.is_none());
+            un.sort_by(|a, b| a.size.cmp(&b.size).then_with(|| a.name.cmp(&b.name)));
         }
     }
 
@@ -149,5 +159,24 @@ mod tests {
         let rows = priority_rows(&fns, &locked, PriorityMode::Biggest);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "mid");
+    }
+
+    #[test]
+    fn smallest_sorts_by_size_asc_excludes_floor_matched_claimed() {
+        let fns = vec![
+            fn_("tiny", false, 4, None, None, None, None),
+            fn_("mid", false, 50, None, None, None, None),
+            fn_("huge", false, 9000, None, None, None, None),
+            fn_("floor", false, 2, None, None, Some("parked"), None),
+            fn_("matched", true, 1, None, None, None, None),
+            fn_("claimed", false, 3, None, None, None, None),
+        ];
+        let mut locked = HashMap::new();
+        locked.insert("claimed".into(), "bob".into());
+        let rows = priority_rows(&fns, &locked, PriorityMode::Smallest);
+        assert_eq!(
+            rows.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            vec!["tiny", "mid", "huge"]
+        );
     }
 }
