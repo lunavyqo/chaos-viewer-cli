@@ -56,7 +56,7 @@ enum Commands {
     Stats,
     /// List functions (optionally by priority mode)
     List {
-        /// nearly | scaffolded | biggest (default: all unmatched sample)
+        /// nearly | scaffolded | biggest | smallest (default: all unmatched sample)
         #[arg(long)]
         priority: Option<String>,
         #[arg(long, default_value_t = 25)]

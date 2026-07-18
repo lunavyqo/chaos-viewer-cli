@@ -76,7 +76,7 @@ flowchart TB
   SCHEMA["schema.rs<br/>ChaosDb · ChaosFunction · ProjectConfig · MatchProvenance"]
   PROJ["projects.rs<br/>projects.toml profiles"]
   CONV["conventions.rs<br/>default vs experimental rules"]
-  PRIO["prioritize.rs<br/>nearly · scaffolded · biggest"]
+  PRIO["prioritize.rs<br/>nearly · scaffolded · biggest · smallest"]
   PROMPT["prompt.rs<br/>builtin + experimental MATCH_RESULT body"]
   TPL["templates.rs<br/>config.toml · user TOML · model picker list"]
   CLAIMS["claims.rs<br/>list / try-lock · CLAIMS.md merge"]

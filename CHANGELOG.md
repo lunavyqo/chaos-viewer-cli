@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Priorities: Smallest functions** — new sub-list (cycle with `n`, or
+  `chaos list --priority smallest`): unmatched, unclaimed, no floor, sorted by
+  size ascending (whole-repo quick wins). Top 25, same filters as Biggest.
+
 - **Local near-miss tip DB** — when `local_repo` points at a decomp with
   `nearmiss/db.jsonl` (sm64ds-shaped tip C + `div`), prompts include that tip even
   if published details lack a draft. CLI: `CHAOS_LOCAL_REPO` or decomp cwd; TUI:

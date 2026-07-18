@@ -892,7 +892,7 @@ OVERVIEW
   Shift+b     clear entire batch
 
 PRIORITIES
-  n           cycle Nearly / Scaffolded / Biggest
+  n           cycle Nearly / Scaffolded / Biggest / Smallest
   j / k       move in ranked list
   enter       jump to Overview with that function selected
 
@@ -2901,7 +2901,8 @@ chaos projects local-repo <id> /path/to/decomp \
                 self.priority_mode = match self.priority_mode {
                     PriorityMode::Nearly => PriorityMode::Scaffolded,
                     PriorityMode::Scaffolded => PriorityMode::Biggest,
-                    PriorityMode::Biggest => PriorityMode::Nearly,
+                    PriorityMode::Biggest => PriorityMode::Smallest,
+                    PriorityMode::Smallest => PriorityMode::Nearly,
                 };
                 self.rebuild_priorities();
                 self.status = format!(
@@ -3990,7 +3991,7 @@ chaos projects local-repo <id> /path/to/decomp \
                 let extra = match self.priority_mode {
                     PriorityMode::Nearly => format!("div={}", f.div.unwrap_or(0)),
                     PriorityMode::Scaffolded => format!("sim={:.2}", f.sim.unwrap_or(0.0)),
-                    PriorityMode::Biggest => format!("{}B", f.size),
+                    PriorityMode::Biggest | PriorityMode::Smallest => format!("{}B", f.size),
                 };
                 let in_batch = self.batch_index(&f.id).is_some();
                 let name_fg = if selected {
