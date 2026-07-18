@@ -1742,6 +1742,20 @@ Press ? or esc to close help."#
             .collect();
         self.priority_sel = 0;
         self.priority_offset = 0;
+        // Keep selected_id in lockstep with the priorities cursor so `b` batches
+        // the highlighted row (not the Overview selection).
+        self.sync_selection_from_priority();
+    }
+
+    fn sync_selection_from_priority(&mut self) {
+        let Some(db) = &self.db else { return };
+        if let Some(&idx) = self.priority_list.get(self.priority_sel) {
+            let new_id = db.functions[idx].id.clone();
+            if self.selected_id.as_deref() != Some(new_id.as_str()) {
+                self.detail_scroll = 0;
+            }
+            self.selected_id = Some(new_id);
+        }
     }
 
     fn sync_selection_from_fn(&mut self) {
@@ -3278,6 +3292,7 @@ chaos projects local-repo <id> /path/to/decomp \
                 let i = self.priority_sel as isize + delta;
                 let i = ((i % n) + n) % n;
                 self.priority_sel = i as usize;
+                self.sync_selection_from_priority();
             }
             Screen::Prompt => {
                 if delta < 0 {
