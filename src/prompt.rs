@@ -364,7 +364,15 @@ ATTEMPT TREE (required mental model — not a flat list of anonymous tries):
     NEVER "a1"/"try2". Do not embed wall-clock times in ids.
   - parentAttemptId = attemptId of the node you built on, or null for a new root.
   - schemaVersion = 1  (bump only when field meanings change).
-  - Privacy: do NOT record loggedAt, ts, or any wall-clock finish time.
+  - Privacy: do NOT record finish timestamps or any wall-clock times.
+
+  STATUS RULES (required — same meaning as log_attempt / match tools):
+  - matched     — only after verify reports MATCH (never guess or soft-claim)
+  - near_miss   — only when this try **improves the tip** (better score than
+    prevBestDivergences; set improvedNearMiss: true)
+  - no_progress — same-or-worse score, settings retry with no win, or an idea
+    you abandon but still log (prefer no_progress over silence)
+  - compile_error / failed / skipped — tool/session outcomes; still one node
 
   Rules:
   - First try for a function: parentAttemptId = null, base.kind = scratch
@@ -413,6 +421,7 @@ attempt**, even when:
 
 status values:
   matched | near_miss | no_progress | compile_error | failed | skipped
+  (matched only after verify; near_miss only when tip improves; else no_progress)
 
 matchProvenance answers HOW only:
   kind=ai    → model + reasoning + harness (slug tokens, no spaces)
@@ -592,7 +601,10 @@ EXPERIMENTAL — BEFORE YOU FINISH
    Pre-filled from this prompt; INHERIT true from parentAttemptId's node if the
    parent had that flag true (Ghidra/near-miss lineage sticks until a true restart
    with parentAttemptId=null and no draft used).
-4. status must reflect reality (prefer no_progress over silence).
+4. status must reflect reality:
+   - matched only after verify MATCH
+   - near_miss only when the tip improves (improvedNearMiss: true)
+   - same-or-worse / no win → no_progress (prefer that over silence)
 5. ALWAYS set sessionScope={session_scope} and batchSize={batch_size} on every
    MATCH_RESULT (every function, every try) — not optional; like model/harness.
    focused = solo session; batch = multi-function session.
@@ -604,14 +616,21 @@ EXPERIMENTAL — BEFORE YOU FINISH
    - matchProvenance kind=ai → model + reasoning + harness (slug tokens)
    - matchProvenance kind=human → no model fields; optional note only
 {author_rule}
-8. If near_miss: include divergences (+ draft when available). Still log if
-   it did NOT beat prevBestDivergences (improvedNearMiss: false) — that node
-   stays on the tree as a dead-end sibling.
-9. Operators append every MATCH_RESULT into config/match_attempts.jsonl
-   (tools/log_attempt.py --session-scope … --batch-size … --used-near-miss-draft
-   / --used-ghidra-draft …). Preserve functionId / attemptId / parentAttemptId /
-   base / usedNearMissDraft / usedGhidraDraft. Never log loggedAt/ts.
-10. Open a PR when matched; PR author should match `author`.
+8. If the tip improved: status=near_miss, include divergences (+ draft when
+   available), improvedNearMiss: true. If score did NOT beat prevBest →
+   status=no_progress (still log the dead-end sibling; improvedNearMiss: false).
+9. MUST call tools/log_attempt.py after EVERY try (not only matches). Pass
+   model + reasoning + harness for kind=ai, session-scope + batch-size,
+   parent-attempt-id when forking a tip, --used-near-miss-draft /
+   --used-ghidra-draft when true. Prefer --src on near_miss so tip C lands in
+   nearmiss/db.jsonl. Do not only paste MATCH_RESULT in chat — the log tool
+   writes the durable store. Preserve functionId / attemptId / parentAttemptId
+   / base / usedNearMissDraft / usedGhidraDraft. Never log wall-clock times.
+10. On MATCH: call stamp_provenance (or bank when it stamps how) with the same
+    AI model + reasoning + harness. That is NOT a new try and does NOT replace
+    log_attempt for the session. If bank is only fan-out JSON verify, use
+    stamp_provenance when present.
+11. Open a PR when matched; PR author should match `author`.
 
 Refuse to claim "matched" without verify succeeding.
 Never skip logging a failed/empty try — it is a leaf on the tree.
@@ -1113,6 +1132,11 @@ mod tests {
         assert!(text.contains("schemaVersion"));
         assert!(!text.contains("loggedAt"));
         assert!(text.contains("ATTEMPT TREE"));
+        assert!(text.contains("STATUS RULES"));
+        assert!(text.contains("only after verify"));
+        assert!(text.contains("only when") && text.contains("improves"));
+        assert!(text.contains("MUST call tools/log_attempt.py"));
+        assert!(text.contains("stamp_provenance"));
         assert!(text.contains("previous_attempt"));
         assert!(text.contains("usedNearMissDraft"));
         assert!(text.contains("usedGhidraDraft"));

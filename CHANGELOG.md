@@ -56,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Experimental prompt logging rules** — status: `matched` only after verify,
+  `near_miss` only when the tip improves, else `no_progress`. Agents **must**
+  call `log_attempt` every try and `stamp_provenance` (or bank-how) on MATCH;
+  bank is not a new try. Privacy wording no longer names removed timestamp
+  fields (so prompts never suggest inventing them). Tools catalog adds
+  `stamp_provenance.py` and clarifies bank/log roles.
 - **TUI performance (major):** stop free-spinning at ~60 fps. The event loop
   now redraws only after input/resize/state changes, so idle CPU is near zero
   and key handling is not fighting continuous full-frame paints.
