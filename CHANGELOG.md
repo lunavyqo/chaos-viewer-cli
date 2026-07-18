@@ -60,6 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Priorities batch/`b` ignored cursor** — j/k only moved the list highlight;
+  `selected_id` stayed on the Overview pick, so every `b` toggled the same
+  function. Cursor and selection now stay in sync (including on mode cycle /
+  screen enter).
+
 - **Experimental prompt logging rules** — status: `matched` only after verify,
   `near_miss` only when the tip improves, else `no_progress`. Agents **must**
   call `log_attempt` every try and `stamp_provenance` (or bank-how) on MATCH;
