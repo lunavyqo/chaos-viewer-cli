@@ -54,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Default prompts: mandatory CLAIMS.md + permuter cleanup** — stock
+  `chaos-viewer` (and shared template claims block) now hard-require reading /
+  updating **CLAIMS.md**, claiming before edits, releasing when done, and
+  **tree-killing permuter workers** on session end. Live API try-lock remains
+  when a session key is present, but no longer replaces CLAIMS.md.
+
 - **TUI header progress** now shows both function and byte match meters
   (`matched/total fn (%)` and `matched/total B (%)`), matching `chaos stats`.
   Load / update status lines include the same pair.
