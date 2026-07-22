@@ -9,8 +9,8 @@
 //! ```
 //!
 //! Built-ins:
-//! - `chaos-viewer` — web parity (default / sm64ds)
-//! - `chaos-experimental` — match task + mandatory matchProvenance reporting
+//! - `chaos-viewer` — stock match + MATCH_RESULT / provenance (default)
+//! - `chaos-experimental` — alias of `chaos-viewer` (kept for older configs)
 
 use std::collections::HashMap;
 use std::fs;
@@ -21,14 +21,14 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::claims::ClaimsSession;
-use crate::prompt::{build_builtin_prompt, build_experimental_prompt, PromptOptions};
+use crate::prompt::{build_builtin_prompt, PromptOptions};
 use crate::schema::{ChaosFunction, FunctionDetail, ProjectConfig};
 
 pub const BUILTIN_ID: &str = "chaos-viewer";
-pub const BUILTIN_NAME: &str = "Chaos Viewer (default)";
-/// Experimental convention: provenance-aware match prompt.
+pub const BUILTIN_NAME: &str = "Chaos Viewer (match + provenance)";
+/// Alias of [`BUILTIN_ID`] (older configs / profiles may still select this id).
 pub const BUILTIN_EXPERIMENTAL_ID: &str = "chaos-experimental";
-pub const BUILTIN_EXPERIMENTAL_NAME: &str = "Chaos Experimental (provenance)";
+pub const BUILTIN_EXPERIMENTAL_NAME: &str = "Chaos Viewer (alias · was experimental)";
 
 pub fn is_builtin_template_id(id: &str) -> bool {
     id == BUILTIN_ID || id == BUILTIN_EXPERIMENTAL_ID
@@ -294,16 +294,17 @@ impl TemplateStore {
             TemplateEntry {
                 id: BUILTIN_ID.into(),
                 name: BUILTIN_NAME.into(),
-                description: "Built-in prompt matching tangosdev/chaos-viewer".into(),
+                description:
+                    "Stock: match task + MATCH_RESULT attempt tree + matchProvenance (default)"
+                        .into(),
                 kind: TemplateKind::Builtin,
                 path: None,
             },
             TemplateEntry {
                 id: BUILTIN_EXPERIMENTAL_ID.into(),
                 name: BUILTIN_EXPERIMENTAL_NAME.into(),
-                description:
-                    "Experimental: match + required model/reasoning/harness (or human) provenance"
-                        .into(),
+                description: "Same body as chaos-viewer (kept for older default_template ids)"
+                    .into(),
                 kind: TemplateKind::Builtin,
                 path: None,
             },
@@ -516,7 +517,8 @@ impl TemplateStore {
             .with_context(|| format!("unknown template '{id}'"))?;
         match &entry.kind {
             TemplateKind::Builtin if entry.id == BUILTIN_EXPERIMENTAL_ID => {
-                Ok(build_experimental_prompt(project, functions, opts))
+                // Same stock body as chaos-viewer (experimental merged into default).
+                Ok(build_builtin_prompt(project, functions, opts))
             }
             TemplateKind::Builtin => Ok(build_builtin_prompt(project, functions, opts)),
             TemplateKind::User(t) => Ok(render_user_template(t, project, functions, opts)),

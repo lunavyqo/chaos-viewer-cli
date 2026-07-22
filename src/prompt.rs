@@ -198,11 +198,11 @@ pub fn batch_max() -> usize {
     BATCH_MAX
 }
 
-/// Build a full prompt the same way the web viewer does:
-/// `[header, ...sections, footer].join("\n\n")`.
+/// Build the stock match prompt (match task + attempt tree + provenance).
 ///
 /// Prefer [`crate::templates::TemplateStore::render`] when a user template id
-/// is selected; this is the built-in `chaos-viewer` body.
+/// is selected. This is the built-in `chaos-viewer` / `chaos-experimental` body
+/// (experimental was merged into default).
 pub fn build_prompt(
     project: &ProjectConfig,
     functions: &[(ChaosFunction, Option<FunctionDetail>)],
@@ -211,33 +211,9 @@ pub fn build_prompt(
     build_builtin_prompt(project, functions, opts)
 }
 
-/// Built-in chaos-viewer prompt (exact web parity).
+/// Stock built-in prompt: retail match task **plus** MATCH_RESULT / attempt tree /
+/// matchProvenance (formerly `chaos-experimental` only).
 pub fn build_builtin_prompt(
-    project: &ProjectConfig,
-    functions: &[(ChaosFunction, Option<FunctionDetail>)],
-    opts: &PromptOptions,
-) -> String {
-    // Web uses batch.length / 1; empty selection is handled by the caller.
-    let n = if functions.is_empty() {
-        1
-    } else {
-        functions.len()
-    };
-    let mut parts: Vec<String> = Vec::new();
-    parts.push(prompt_header(project, n, opts));
-    for (fn_, det) in functions {
-        parts.push(prompt_section(project, fn_, det.as_ref(), opts));
-    }
-    parts.push(prompt_footer(project, n, opts));
-    parts.join("\n\n")
-}
-
-/// Built-in **experimental** prompt: chaos-viewer match task + mandatory
-/// match-provenance reporting (model, reasoning level, harness — or human).
-///
-/// For projects on the experimental convention. Does not change the default
-/// `chaos-viewer` template (sm64ds / upstream parity).
-pub fn build_experimental_prompt(
     project: &ProjectConfig,
     functions: &[(ChaosFunction, Option<FunctionDetail>)],
     opts: &PromptOptions,
@@ -255,7 +231,7 @@ pub fn build_experimental_prompt(
     } else {
         ("batch", n)
     };
-    parts.push(prompt_header_experimental(
+    parts.push(prompt_header_with_provenance(
         project,
         n,
         &author,
@@ -274,7 +250,7 @@ pub fn build_experimental_prompt(
             opts,
         ));
     }
-    parts.push(prompt_footer_experimental(
+    parts.push(prompt_footer_with_provenance(
         project,
         n,
         opts,
@@ -283,6 +259,15 @@ pub fn build_experimental_prompt(
         batch_size,
     ));
     parts.join("\n\n")
+}
+
+/// Alias kept for callers/templates that still name the old experimental stock.
+pub fn build_experimental_prompt(
+    project: &ProjectConfig,
+    functions: &[(ChaosFunction, Option<FunctionDetail>)],
+    opts: &PromptOptions,
+) -> String {
+    build_builtin_prompt(project, functions, opts)
 }
 
 /// Operator GitHub login for the classic **`author`** credit field.
@@ -307,7 +292,7 @@ fn operator_github_handle(opts: &PromptOptions) -> String {
     "YOUR_GITHUB_LOGIN".into()
 }
 
-fn prompt_header_experimental(
+fn prompt_header_with_provenance(
     project: &ProjectConfig,
     n: usize,
     author: &str,
@@ -343,7 +328,7 @@ Same field as contributor colors."
         r#"
 
 ======================================================================
-EXPERIMENTAL — WHO vs HOW vs ATTEMPT TREE
+WHO vs HOW vs ATTEMPT TREE
 ======================================================================
 WHO (credit, contributor colors) → function field `author` (GitHub login)
 HOW  (final method when banked)  → `matchProvenance` only
@@ -569,7 +554,7 @@ Example after a few tries (sketch only — emit the YAML node, not this art):
     )
 }
 
-fn prompt_footer_experimental(
+fn prompt_footer_with_provenance(
     project: &ProjectConfig,
     n: usize,
     opts: &PromptOptions,
@@ -592,7 +577,7 @@ fn prompt_footer_experimental(
         r#"
 
 ======================================================================
-EXPERIMENTAL — BEFORE YOU FINISH
+BEFORE YOU FINISH
 ======================================================================
 1. For EACH function, emit a filled MATCH_RESULT **node** for this try.
 2. Identity (required): schemaVersion=1, functionId (atlas id), unique attemptId
@@ -753,12 +738,10 @@ files — even if present."
         );
     }
     lines.push(String::new());
-    // Keep this shared block free of experimental MATCH_RESULT / provenance
-    // jargon — default (chaos-viewer / sm64ds) must not mention those fields.
-    // Experimental templates restate draft trackers in their own header/footer.
     lines.push(
         "If both OFF: fresh try from TARGET DISASSEMBLY only. \
-Respect the USE / MUST NOT rules above for every attempt."
+Respect the USE / MUST NOT rules above for every attempt. \
+MATCH_RESULT usedNearMissDraft / usedGhidraDraft must match what you actually used."
             .into(),
     );
     lines.join("\n")
@@ -1348,29 +1331,21 @@ mod tests {
     }
 
     #[test]
-    fn default_builtin_prompt_has_no_experimental_match_result_jargon() {
-        // Regression: draft policy / shared header must not leak MATCH_RESULT
-        // trackers into the default chaos-viewer (sm64ds) template.
+    fn default_builtin_prompt_includes_provenance_and_attempt_tree() {
+        // Experimental tracking is now the stock default body.
         let project = sample_project();
         let fn_ = sample_fn();
         let text = build_builtin_prompt(&project, &[(fn_, None)], &PromptOptions::default());
-        for banned in [
-            "MATCH_RESULT",
-            "matchProvenance",
-            "usedNearMissDraft",
-            "usedGhidraDraft",
-            "sessionScope",
-            "log_attempt",
-            "stamp_provenance",
-            "EXPERIMENTAL —",
-        ] {
-            assert!(
-                !text.contains(banned),
-                "default prompt must not contain experimental jargon {banned:?}"
-            );
-        }
+        assert!(text.contains("MATCH_RESULT"));
+        assert!(text.contains("matchProvenance"));
+        assert!(text.contains("usedNearMissDraft"));
+        assert!(text.contains("usedGhidraDraft"));
+        assert!(text.contains("sessionScope"));
+        assert!(text.contains("log_attempt"));
+        assert!(text.contains("stamp_provenance"));
+        assert!(text.contains("WHO vs HOW vs ATTEMPT TREE"));
         assert!(text.contains("DRAFT POLICY"));
-        assert!(text.contains("Respect the USE / MUST NOT rules"));
+        assert!(!text.contains("EXPERIMENTAL —"));
     }
 
     #[test]
@@ -1431,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn matches_web_header_section_footer_shape() {
+    fn stock_prompt_keeps_match_task_shape_plus_provenance() {
         let project = sample_project();
         let fn_ = sample_fn();
         let det = FunctionDetail {
@@ -1445,38 +1420,21 @@ mod tests {
         };
         let text = build_prompt(&project, &[(fn_, Some(det))], &PromptOptions::default());
 
-        // Header
-        assert!(text.starts_with(
-            "Match one demo function to the retail binary, byte-for-byte.\n\nSETUP (once): clone https://github.com/you/demo\n\nCOMPILER: mwccarm -O4,p\n\nREAD FIRST: README.md"
-        ));
-        // Section separators / address style (no 0-pad beyond toString(16))
+        // Match-task core
+        assert!(text.contains("Match one demo function to the retail binary, byte-for-byte."));
         assert!(text.contains(
             "FUNCTION: func_020009e0   module: arm9   addr: 0x20009e0   size: 120 bytes"
         ));
-        assert!(text.contains(
-            "VERIFY every attempt (relocation-aware byte compare):\n  python tools/match.py --func func_020009e0 --addr 0x20009e0 --size 0x78"
-        ));
-        assert!(text.contains(
-            "CLOSEST MATCHED SIBLING (opcode similarity 0.87): src/func_scaffold.c[pp] - use it as your scaffold."
-        ));
         assert!(text.contains("NEAR-MISS DRAFT — INCLUDED BELOW"));
-        assert!(text.contains("USE IT as the starting C (2 instruction(s) from matching)"));
-        assert!(text.contains("```c\nint f(void) { return 0; }\n```"));
         assert!(text.contains("DRAFT POLICY"));
-        assert!(text.contains("TARGET DISASSEMBLY (annotated, callees resolved):\n```\n  020009e0:  ldr      r0, [pc, #0x6c]\n  020009e4:  ldr      r1, [r0]\n```"));
-        // Footer
+        assert!(text.contains("TARGET DISASSEMBLY (annotated, callees resolved):"));
         assert!(text.contains("Rules: no ROM"));
-        assert!(text.contains(
-            "Matched means byte-identical - iterate until the verify command reports a MATCH."
-        ));
-        assert!(text.contains(
-            "When it matches, fork the repo and open a pull request to https://github.com/you/demo against its default branch\n(one function or a small related family per PR; note the compiler version and the function address)."
-        ));
-        assert!(text.contains("save drafts"));
-        // Join style: header / section / footer separated by blank lines
-        assert!(text.contains(
-            "\n\n======================================================================\n"
-        ));
+        assert!(text.contains("Matched means byte-identical"));
+        // Provenance / attempt tree (now stock default)
+        assert!(text.contains("MATCH_RESULT"));
+        assert!(text.contains("matchProvenance"));
+        assert!(text.contains("WHO vs HOW vs ATTEMPT TREE"));
+        assert!(text.contains("BEFORE YOU FINISH"));
     }
 
     #[test]

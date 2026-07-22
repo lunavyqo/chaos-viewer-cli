@@ -244,7 +244,7 @@ pub fn write_prompt_file_tagged(prompt: &str, tag: Option<&str>) -> Result<PathB
 pub fn bootstrap_message(prompt_path: &Path) -> String {
     format!(
         "Read the full match task at {} and execute it completely \
-(verify, bank/log if experimental). Work only inside the LOCAL DECOMP REPOSITORY \
+(verify, bank, log attempts). Work only inside the LOCAL DECOMP REPOSITORY \
 path stated at the top of that file. Do not ask me to paste the prompt.",
         prompt_path.display()
     )
