@@ -74,6 +74,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Default prompt leaked experimental jargon** — shared draft-policy text told
+  agents about `MATCH_RESULT` / `usedNearMissDraft` / `usedGhidraDraft` even on
+  the stock `chaos-viewer` (sm64ds / default convention) template. Agent launch
+  preamble also stopped hard-coding `log_attempt` (experimental). Those fields
+  remain only on `chaos-experimental`.
+
 - **Priorities batch/`b` ignored cursor** — j/k only moved the list highlight;
   `selected_id` stayed on the Overview pick, so every `b` toggled the same
   function. Cursor and selection now stay in sync (including on mode cycle /
