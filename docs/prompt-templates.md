@@ -215,7 +215,7 @@ Rendered as `header`, then each `function`, then `footer`, joined with blank lin
 | `{github_target}` | ` to {github}` or empty |
 | `{compiler}` `{setup}` `{rules}` `{read_first}` `{cpp_note}` `{near_miss_note}` | From atlas `project` block |
 | `{claims_api}` | Claims API base if any |
-| `{section_claims}` | Full claims agent block if session env is set; else empty |
+| `{section_claims}` | Mandatory CLAIMS.md + cleanup (+ API key lines when session set) |
 
 ### Placeholders — function body
 

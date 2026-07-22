@@ -983,26 +983,8 @@ fn fill_fn_placeholders(t: &str, project: &ProjectConfig, fn_: &ChaosFunction) -
 }
 
 fn claims_block(project: &ProjectConfig, n: usize, session: Option<&ClaimsSession>) -> String {
-    let (Some(api), Some(session)) = (project.claims_api.as_deref(), session) else {
-        return String::new();
-    };
-    let handle = if session.handle.is_empty() {
-        "chaos-viewer-user"
-    } else {
-        session.handle.as_str()
-    };
-    let each = if n > 1 {
-        "EACH function"
-    } else {
-        "the function"
-    };
-    format!(
-        "CLAIMS (coordination lock; do this BEFORE writing code): my claims api key is {} - send it as the X-Api-Key header on every claims call.\n\
-For {each} above: POST {api}/try-lock with JSON {{\"module\": \"<module>\", \"start\": \"0x<addr>\", \"end\": \"0x<addr+size>\", \"handle\": \"{handle}\"}}.\n\
-Save the returned claim.id; renew while working (POST {api}/{{id}}/renew with {{\"handle\": \"{handle}\"}}) and release when done (POST {api}/{{id}}/release, same body).\n\
-If try-lock returns a conflict, someone else has it - skip that function. If calls return 401 the short-lived key expired - continue without locking and tell me to re-sign-in. Full contract: GET {api}/instructions.",
-        session.token
-    )
+    // Same mandatory CLAIMS.md + cleanup text as the builtin footer.
+    crate::prompt::claims_and_cleanup_block(project, n, session).join("\n")
 }
 
 #[cfg(test)]

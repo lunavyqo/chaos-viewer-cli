@@ -631,10 +631,19 @@ EXPERIMENTAL — BEFORE YOU FINISH
     log_attempt for the session. If bank is only fan-out JSON verify, use
     stamp_provenance when present.
 11. Open a PR when matched; PR author should match `author`.
+12. Claims + cleanup (same as default footer — still required here):
+    - You must have claimed via CLAIMS.md and/or the live API before work.
+    - On byte-identical MATCH: do NOT unclaim/release that function — set
+      CLAIMS.md status to **done** (keep credit). Only release/unclaim work you
+      did **not** match.
+    - On exit without MATCH: release API locks / mark CLAIMS.md released.
+    - Tree-kill any permuter / grind processes you started. Do not leave workers.
 
 Refuse to claim "matched" without verify succeeding.
 Never skip logging a failed/empty try — it is a leaf on the tree.
 Never reuse attemptId. Never key history by function name alone — use functionId.
+Never skip CLAIMS.md / permuter shutdown because the try failed.
+Never unclaim a function you matched byte-identical.
 "#,
         author_rule = author_rule,
         session_scope = session_scope,
@@ -913,41 +922,20 @@ GHIDRA SCAFFOLD files for this function even if present on disk."
     lines.join("\n")
 }
 
-/// Port of `promptFooter(n)` from chaos-viewer App.tsx.
+/// Port of `promptFooter(n)` from chaos-viewer App.tsx, plus mandatory claims /
+/// cleanup rules models often skip when only mentioned softly in READ FIRST.
 fn prompt_footer(project: &ProjectConfig, n: usize, opts: &PromptOptions) -> String {
     // Web starts with an empty line entry.
     let mut lines = vec![String::new()];
     if let Some(rules) = &project.rules {
         lines.push(format!("Rules: {rules}"));
     }
-    if let (Some(api), Some(session)) =
-        (project.claims_api.as_deref(), opts.claims_session.as_ref())
-    {
-        let handle = if session.handle.is_empty() {
-            "chaos-viewer-user"
-        } else {
-            session.handle.as_str()
-        };
-        let each = if n > 1 {
-            "EACH function"
-        } else {
-            "the function"
-        };
-        lines.push(String::new());
-        lines.push(format!(
-            "CLAIMS (coordination lock; do this BEFORE writing code): my claims api key is {} - send it as the X-Api-Key header on every claims call.",
-            session.token
-        ));
-        lines.push(format!(
-            "For {each} above: POST {api}/try-lock with JSON {{\"module\": \"<module>\", \"start\": \"0x<addr>\", \"end\": \"0x<addr+size>\", \"handle\": \"{handle}\"}}."
-        ));
-        lines.push(format!(
-            "Save the returned claim.id; renew while working (POST {api}/{{id}}/renew with {{\"handle\": \"{handle}\"}}) and release when done (POST {api}/{{id}}/release, same body)."
-        ));
-        lines.push(format!(
-            "If try-lock returns a conflict, someone else has it - skip that function. If calls return 401 the short-lived key expired - continue without locking and tell me to re-sign-in. Full contract: GET {api}/instructions."
-        ));
-    }
+    lines.push(String::new());
+    lines.extend(claims_and_cleanup_block(
+        project,
+        n,
+        opts.claims_session.as_ref(),
+    ));
     let target = if project.github.is_empty() {
         String::new()
     } else {
@@ -976,6 +964,152 @@ fn prompt_footer(project: &ProjectConfig, n: usize, opts: &PromptOptions) -> Str
         }
     }
     lines.join("\n")
+}
+
+/// Mandatory CLAIMS.md + optional live API + permuter shutdown.
+///
+/// Always emitted on the default (and experimental) footers so agents cannot
+/// treat claims as optional flavor text. API key lines only appear when a
+/// session is configured.
+pub(crate) fn claims_and_cleanup_block(
+    project: &ProjectConfig,
+    n: usize,
+    session: Option<&ClaimsSession>,
+) -> Vec<String> {
+    let each = if n > 1 {
+        "EACH function above"
+    } else {
+        "the function above"
+    };
+    let handle = session
+        .map(|s| s.handle.as_str())
+        .filter(|h| !h.is_empty())
+        .unwrap_or("YOUR_HANDLE");
+
+    let mut lines = vec![
+        "======================================================================".into(),
+        "REQUIRED — CLAIMS (do this BEFORE writing code; do not skip)".into(),
+        "======================================================================".into(),
+        "Human and agent workers coordinate via CLAIMS.md at the decomp repo root.".into(),
+        "Ignoring claims wastes parallel effort. Treat this as a hard gate.".into(),
+        String::new(),
+        "BEFORE matching / editing:".into(),
+        "  1. Open and read CLAIMS.md (repo root). Note active rows.".into(),
+        format!(
+            "  2. For {each}: if someone else already has an active claim on that \
+module/addr range, SKIP it (do not match over their claim)."
+        ),
+        format!("  3. Claim your work under handle \"{handle}\" BEFORE the first edit:"),
+        "     a) Prefer the live claims API when a key is provided below (try-lock).".into(),
+        "     b) Always keep CLAIMS.md honest: add/update a table row for your \
+range/function(s) — Range, Who, date, status=active — even if the API also holds a lock."
+            .into(),
+        "     c) If tools/claims.py exists and you have CLAIMS_API_KEY / claims_key.txt, \
+you may use: python tools/claims.py lock --module … --start 0x… --end 0x…"
+            .into(),
+        "  4. Do not start matching until the claim is recorded (API and/or CLAIMS.md).".into(),
+        String::new(),
+        "WHILE working:".into(),
+        "  - Renew API locks if you hold claim ids (TTL is finite).".into(),
+        "  - Do not expand into unclaimed ranges without claiming them first.".into(),
+        String::new(),
+        "WHEN FINISHED (match, near-miss park, give-up, or session end) — MANDATORY:".into(),
+        "  1. CLAIMS after a BYTE-IDENTICAL MATCH (verify reports MATCH):".into(),
+        "     - Do NOT unclaim / release / drop the claim for that function.".into(),
+        "     - Keep credit: set CLAIMS.md status to **done** (or equivalent), \
+with a short note that it matched — never status=released and never delete \
+the row as if you abandoned the work."
+            .into(),
+        "     - If the live API still holds a lock on a fully matched range, \
+prefer leaving credit intact (done) over release; do **not** unclaim a match."
+            .into(),
+        "  2. CLAIMS after give-up / no match / session end without MATCH:".into(),
+        "     - Release every API lock you took (POST …/release or tools/claims.py release)."
+            .into(),
+        "     - Update CLAIMS.md: status=released (or remove the row). \
+Do not leave stale active rows on abandoned work."
+            .into(),
+        "  3. Stop every decomp-permuter process you started (see below).".into(),
+    ];
+
+    if let (Some(api), Some(session)) = (project.claims_api.as_deref(), session) {
+        let api = api.trim().trim_end_matches('/');
+        lines.push(String::new());
+        lines.push(format!(
+            "CLAIMS API KEY (send as X-Api-Key on every write): {}",
+            session.token
+        ));
+        lines.push(format!("API base: {api}"));
+        lines.push(format!(
+            "For {each}: POST {api}/try-lock with JSON \
+{{\"module\": \"<module>\", \"start\": \"0x<addr>\", \"end\": \"0x<addr+size>\", \
+\"handle\": \"{handle}\", \"note\": \"optional\"}}."
+        ));
+        lines.push(format!(
+            "Save claim.id; renew: POST {api}/{{id}}/renew {{\"handle\":\"{handle}\"}} · \
+release: POST {api}/{{id}}/release same body."
+        ));
+        lines.push(
+            "Conflict → skip that function. 401 → key expired; fall back to CLAIMS.md only \
+and tell the operator to re-sign-in. Full contract: GET {api}/instructions."
+                .replace("{api}", api),
+        );
+        lines.push("API lock does NOT replace CLAIMS.md — still update the markdown table.".into());
+    } else if project
+        .claims_api
+        .as_ref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        lines.push(String::new());
+        lines.push(format!(
+            "Live claims API is configured ({}) but no session key is in this prompt — \
+use CLAIMS.md (and tools/claims.py if the operator set CLAIMS_API_KEY).",
+            project.claims_api.as_deref().unwrap_or("")
+        ));
+    } else {
+        lines.push(String::new());
+        lines.push(
+            "No live claimsApi in project config — CLAIMS.md is the coordination surface. \
+Do not invent an API host."
+                .into(),
+        );
+    }
+
+    lines.push(String::new());
+    lines.push("======================================================================".into());
+    lines.push("REQUIRED — PERMUTER / BACKGROUND JOB CLEANUP".into());
+    lines.push("======================================================================".into());
+    lines.push(
+        "If you run tools/permuter (permuter.py, crunch.py, batch.py, import_func, etc.):".into(),
+    );
+    lines.push(
+        "  - The permuter spawns worker PROCESSES (-j). Killing only the parent or \
+exiting the chat leaves them running and they burn CPU/RAM."
+            .into(),
+    );
+    lines.push(
+        "  - When the job ends (match, timeout, give-up, or you stop the session), \
+STOP THE WHOLE PROCESS TREE before you finish:"
+            .into(),
+    );
+    lines.push(
+        "      Unix/macOS: kill the process group (e.g. kill -- -PGID) or \
+pkill -P <parent_pid> then kill <parent_pid>; confirm with pgrep/ps that no \
+permuter.py / mwccarm worker remains."
+            .into(),
+    );
+    lines.push("      Windows: taskkill /F /T /PID <pid> (tree kill).".into());
+    lines.push(
+        "  - Prefer a hard time budget + tree-kill on timeout (same pattern as \
+tools/permuter/crunch.py). Never leave permuters running after the task ends."
+            .into(),
+    );
+    lines.push(
+        "  - Same rule for any other long-running grind you started (crack loops, \
+overnight sweeps): shut them down on exit."
+            .into(),
+    );
+    lines
 }
 
 #[cfg(test)]
@@ -1237,6 +1371,49 @@ mod tests {
         }
         assert!(text.contains("DRAFT POLICY"));
         assert!(text.contains("Respect the USE / MUST NOT rules"));
+    }
+
+    #[test]
+    fn default_prompt_requires_claims_md_and_permuter_shutdown() {
+        // Always present even without a claims session (models skip soft hints).
+        let project = sample_project();
+        let fn_ = sample_fn();
+        let text = build_builtin_prompt(&project, &[(fn_, None)], &PromptOptions::default());
+        assert!(text.contains("REQUIRED — CLAIMS"));
+        assert!(text.contains("CLAIMS.md"));
+        assert!(text.contains("BEFORE matching"));
+        assert!(text.contains("Do NOT unclaim") || text.contains("do NOT unclaim"));
+        assert!(text.contains("BYTE-IDENTICAL MATCH"));
+        assert!(text.contains("REQUIRED — PERMUTER"));
+        assert!(
+            text.contains("PROCESS TREE")
+                || text.contains("process tree")
+                || text.contains("process group")
+        );
+        assert!(text.contains("taskkill") || text.contains("pkill"));
+        // Without session, must not invent a fake API key line.
+        assert!(!text.contains("CLAIMS API KEY"));
+    }
+
+    #[test]
+    fn default_prompt_includes_api_when_session_present() {
+        let mut project = sample_project();
+        project.claims_api = Some("https://tangos.dev/api/claims".into());
+        let fn_ = sample_fn();
+        let opts = PromptOptions {
+            claims_session: Some(ClaimsSession {
+                token: "test-key".into(),
+                handle: "tester".into(),
+            }),
+            ..Default::default()
+        };
+        let text = build_builtin_prompt(&project, &[(fn_, None)], &opts);
+        assert!(text.contains("CLAIMS.md"));
+        assert!(text.contains("CLAIMS API KEY"));
+        assert!(text.contains("test-key"));
+        assert!(text.contains("try-lock"));
+        assert!(text.contains("API lock does NOT replace CLAIMS.md"));
+        assert!(text.contains("REQUIRED — PERMUTER"));
     }
 
     #[test]
