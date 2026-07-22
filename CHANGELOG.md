@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **`L`** claim selected, **`A`** claim **all** mass-batcher slots, **`y`** /
   **`x`** renew / release my claims, **`o`** sign out. Session + my-claim ids
   stored in `~/.config/chaos/claims-session.toml` (env still overrides).
+  “My claims” lists **handle + function name** first; `clm_…` is only the API
+  lock id for renew/release (not a display name).
 
 - **Mass batcher** — multiple prompt batches (1, 2, 3, …). Switch with **`,`** /
   **`.`** (or **`<`** / **`>`**). **`+`** / **`=`** opens a new empty batch after

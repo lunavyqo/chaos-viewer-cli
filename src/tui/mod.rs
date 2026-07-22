@@ -5010,24 +5010,44 @@ chaos projects local-repo <id> /path/to/decomp \
         }
 
         if !self.my_claims.is_empty() {
-            lines.push("My claims (this machine):".into());
-            for c in self.my_claims.iter().take(12) {
+            let who = self
+                .claims_session
+                .as_ref()
+                .map(|s| s.handle.as_str())
+                .filter(|h| !h.is_empty())
+                .unwrap_or("you");
+            lines.push(format!(
+                "My claims (this machine · handle {who} · y renew · x release):"
+            ));
+            // Name + module first (human-readable). Claim API id last — only needed
+            // for renew/release, not as the primary label.
+            for c in self.my_claims.iter().take(16) {
+                let label = if c.name.is_empty() {
+                    format!("0x{:x}", c.start)
+                } else {
+                    c.name.clone()
+                };
                 lines.push(format!(
-                    "  {}  {}  0x{:x}-0x{:x}  {}",
-                    c.id, c.module, c.start, c.end, c.name
+                    "  {who:16}  {mod_}  {label}  0x{start:x}-0x{end:x}  ({id})",
+                    who = who,
+                    mod_ = c.module,
+                    label = label,
+                    start = c.start,
+                    end = c.end,
+                    id = c.id,
                 ));
             }
-            if self.my_claims.len() > 12 {
-                lines.push(format!("  … +{} more", self.my_claims.len() - 12));
+            if self.my_claims.len() > 16 {
+                lines.push(format!("  … +{} more", self.my_claims.len() - 16));
             }
             lines.push(String::new());
         }
 
-        lines.push("Active locks (sample):".into());
+        lines.push("Active locks (sample · who → function id):".into());
         let mut entries: Vec<_> = self.locked_by.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
-        for (id, handle) in entries.into_iter().take(24) {
-            lines.push(format!("  {handle:20}  {id}"));
+        for (fn_id, handle) in entries.into_iter().take(24) {
+            lines.push(format!("  {handle:20}  {fn_id}"));
         }
         if self.locked_by.is_empty() {
             lines.push("  (none right now)".into());
