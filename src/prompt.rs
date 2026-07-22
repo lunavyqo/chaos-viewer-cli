@@ -633,13 +633,17 @@ EXPERIMENTAL — BEFORE YOU FINISH
 11. Open a PR when matched; PR author should match `author`.
 12. Claims + cleanup (same as default footer — still required here):
     - You must have claimed via CLAIMS.md and/or the live API before work.
-    - On exit: release API locks, update CLAIMS.md status, and tree-kill any
-      permuter / grind processes you started. Do not leave workers running.
+    - On byte-identical MATCH: do NOT unclaim/release that function — set
+      CLAIMS.md status to **done** (keep credit). Only release/unclaim work you
+      did **not** match.
+    - On exit without MATCH: release API locks / mark CLAIMS.md released.
+    - Tree-kill any permuter / grind processes you started. Do not leave workers.
 
 Refuse to claim "matched" without verify succeeding.
 Never skip logging a failed/empty try — it is a leaf on the tree.
 Never reuse attemptId. Never key history by function name alone — use functionId.
-Never skip CLAIMS.md / lock release / permuter shutdown because the try failed.
+Never skip CLAIMS.md / permuter shutdown because the try failed.
+Never unclaim a function you matched byte-identical.
 "#,
         author_rule = author_rule,
         session_scope = session_scope,
