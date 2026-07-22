@@ -50,7 +50,8 @@ Unpack and put `chaos` (or `chaos.exe`) on your `PATH`.
   **multiple templates** (built-in `chaos-viewer` + experimental provenance
   prompt + user TOML under `~/.config/chaos/templates`)
 - Optional **pluggable claims** coordination: any HTTP coordinator via
-  `project.claimsApi` (not hardcoded to one host) + `CLAIMS.md` merge
+  `project.claimsApi` (sm64ds uses tangos.dev) + `CLAIMS.md` merge; TUI can
+  **sign in / try-lock / renew / release** like the web viewer (`L` / `A` / Claims page)
 
 ## Requirements
 

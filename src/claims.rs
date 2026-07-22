@@ -1,11 +1,14 @@
 //! Generic claims coordination: CLAIMS.md + any HTTP claims API.
 //!
-//! The CLI does **not** hardcode a host (belongto.us is just one provider).
+//! The CLI does **not** hardcode a host (belongto.us / tangos.dev are providers).
 //! The project publishes `project.claimsApi` (and optionally `claimsAuthUrl`);
 //! we speak the chaos-viewer-compatible contract against that base URL.
 //! See `docs/claims-api.md`.
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::Client;
@@ -13,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::discover::parse_github;
 use crate::schema::ChaosFunction;
+use crate::templates::chaos_home;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claim {
@@ -55,6 +59,31 @@ pub struct ClaimsSession {
     pub handle: String,
 }
 
+/// One lock we acquired this session (for renew / release), like the web viewer's
+/// `chaos-my-claims` localStorage list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MyClaimRecord {
+    pub id: String,
+    pub module: String,
+    pub start: u64,
+    pub end: u64,
+    pub name: String,
+}
+
+/// On-disk auth + my-claims under CHAOS_HOME (`claims-session.toml`).
+///
+/// Token is a secret — never commit this file. Env vars still override load.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SavedClaimsAuth {
+    pub token: String,
+    pub handle: String,
+    /// Last `claimsApi` base this session was used with (informational).
+    #[serde(default)]
+    pub api: Option<String>,
+    #[serde(default)]
+    pub my_claims: Vec<MyClaimRecord>,
+}
+
 impl ClaimsSession {
     /// Read credentials from the environment (any coordinator).
     ///
@@ -76,6 +105,127 @@ impl ClaimsSession {
             std::env::var("CHAOS_CLAIMS_HANDLE").unwrap_or_else(|_| "chaos-viewer-user".into());
         Some(Self { token, handle })
     }
+
+    /// Env first, then saved `claims-session.toml`.
+    pub fn load() -> Option<Self> {
+        if let Some(s) = Self::from_env() {
+            return Some(s);
+        }
+        load_saved_auth().and_then(|a| {
+            if a.token.trim().is_empty() {
+                None
+            } else {
+                Some(Self {
+                    token: a.token,
+                    handle: if a.handle.trim().is_empty() {
+                        "chaos-viewer-user".into()
+                    } else {
+                        a.handle
+                    },
+                })
+            }
+        })
+    }
+
+    pub fn is_ready(&self) -> bool {
+        !self.token.trim().is_empty()
+    }
+}
+
+fn claims_session_path() -> PathBuf {
+    chaos_home().join("claims-session.toml")
+}
+
+pub fn load_saved_auth() -> Option<SavedClaimsAuth> {
+    let path = claims_session_path();
+    let text = fs::read_to_string(path).ok()?;
+    toml::from_str(&text).ok()
+}
+
+pub fn save_auth(
+    session: &ClaimsSession,
+    api: Option<&str>,
+    my_claims: &[MyClaimRecord],
+) -> Result<()> {
+    let home = chaos_home();
+    fs::create_dir_all(&home).with_context(|| format!("mkdir {}", home.display()))?;
+    let saved = SavedClaimsAuth {
+        token: session.token.clone(),
+        handle: session.handle.clone(),
+        api: api
+            .map(str::to_string)
+            .or_else(|| load_saved_auth().and_then(|a| a.api)),
+        my_claims: my_claims.to_vec(),
+    };
+    let text = toml::to_string_pretty(&saved).context("serialize claims-session.toml")?;
+    let path = claims_session_path();
+    fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+pub fn clear_saved_auth() -> Result<()> {
+    let path = claims_session_path();
+    if path.is_file() {
+        fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
+pub fn load_my_claims() -> Vec<MyClaimRecord> {
+    load_saved_auth().map(|a| a.my_claims).unwrap_or_default()
+}
+
+/// Open `url` in the default browser (best-effort).
+pub fn open_in_browser(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(url)
+            .status()
+            .with_context(|| format!("open {url}"))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .status()
+            .with_context(|| format!("start {url}"))?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        for bin in ["xdg-open", "gio", "gnome-open"] {
+            if Command::new(bin)
+                .arg(url)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+        }
+        bail!("could not open browser (tried xdg-open); visit: {url}");
+    }
+    #[allow(unreachable_code)]
+    Ok(())
+}
+
+/// `gh auth token` → `POST {origin}/auth/github/token` (tangos.dev / compatible).
+pub async fn session_from_gh_cli(client: &ClaimsClient) -> Result<ClaimsSession> {
+    let output = Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+        .context("run `gh auth token` (install GitHub CLI and sign in)")?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        bail!("gh auth token failed: {}", err.trim());
+    }
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if token.is_empty() {
+        bail!("gh auth token returned empty");
+    }
+    client.exchange_github_token(&token).await
 }
 
 /// Strip trailing slashes so `${base}/try-lock` is well-formed.

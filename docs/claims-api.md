@@ -66,6 +66,26 @@ export CHAOS_CLAIMS_API_KEY='…'      # or CHAOS_CLAIMS_SESSION / CHAOS_CLAIMS_
 export CHAOS_CLAIMS_HANDLE='your-name'
 ```
 
+The TUI also persists a session under `~/.config/chaos/claims-session.toml`
+(created by sign-in / paste). Env vars override that file when set.
+
+## TUI (same write path as the web viewer)
+
+With a loaded atlas that publishes `project.claimsApi` (sm64ds →
+`https://tangos.dev/api/claims`):
+
+| Key | Action |
+|-----|--------|
+| **`i`** (Claims page) | Sign in: try `gh auth token` → `POST /auth/github/token`, else paste Discord key / session |
+| **`o`** | Sign out (clears saved session) |
+| **`L`** | Claim selected function (`POST …/try-lock`) |
+| **`A`** | Claim every function in the active mass-batcher slot |
+| **`y`** | Renew my claims |
+| **`x`** | Release my claims |
+| **`r`** | Refresh lock list |
+
+Notes use `via chaos-viewer-cli: <name>`. Claim ids are stored for renew/release.
+
 ## CLI commands
 
 ```bash

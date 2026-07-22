@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI claims write path** — claim / renew / release against
+  `project.claimsApi` (sm64ds → tangos.dev), same contract as the web viewer.
+  **`i`** sign-in (`gh auth token` exchange or paste Discord/session key),
+  **`L`** claim selected, **`A`** claim active batch, **`y`** / **`x`** renew /
+  release my claims, **`o`** sign out. Session + my-claim ids stored in
+  `~/.config/chaos/claims-session.toml` (env still overrides).
+
 - **Mass batcher** — multiple prompt batches (1, 2, 3, …). Switch with **`,`** /
   **`.`** (or **`<`** / **`>`**). **`+`** / **`=`** opens a new empty batch after
   the active slot (no-op if active is already empty). Each slot still max 16
