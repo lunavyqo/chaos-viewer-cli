@@ -79,7 +79,7 @@ With a loaded atlas that publishes `project.claimsApi` (sm64ds →
 | **`i`** (Claims page) | Sign in: try `gh auth token` → `POST /auth/github/token`, else paste Discord key / session |
 | **`o`** | Sign out (clears saved session) |
 | **`L`** | Claim selected function (`POST …/try-lock`) |
-| **`A`** | Claim every function in the active mass-batcher slot |
+| **`A`** | Claim every function in **all** mass-batcher slots |
 | **`y`** | Renew my claims |
 | **`x`** | Release my claims |
 | **`r`** | Refresh lock list |

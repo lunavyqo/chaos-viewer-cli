@@ -898,7 +898,7 @@ impl App {
                 },
                 KeyHint {
                     key: "A",
-                    action: "claim batch",
+                    action: "claim all batches",
                 },
                 KeyHint {
                     key: "y",
@@ -943,7 +943,7 @@ GLOBAL
   u           update progress (re-fetch chaos-db; matches can land mid-session)
   r           refresh claims only
   L           claim selected function on project.claimsApi (e.g. tangos.dev)
-  A           claim every function in the active mass-batcher slot
+  A           claim every function in ALL mass-batcher slots (not only active)
   c           copy active-batch prompt to clipboard (no-op if active empty)
   g           launch default agent for ALL non-empty batches (Prompt)
               · each batch opens a separate terminal window · Shift+g agent picker
@@ -1001,7 +1001,7 @@ CLAIMS (page 4 — live locks via project.claimsApi, e.g. https://tangos.dev/api
   i           sign in: try `gh auth token` exchange, else paste API key / session
   o           sign out (clears saved ~/.config/chaos/claims-session.toml)
   L           claim the Overview/Priorities selected function
-  A           claim all functions in the active batch
+  A           claim all functions in every mass-batcher slot
   y           renew every lock we hold (my claims)
   x           release every lock we hold
   Session is required for write; Discord key or GitHub session both work as X-Api-Key.
@@ -1857,24 +1857,42 @@ or Discord: DM bot `key` · enter when ready"
         self.claim_functions(vec![f]).await;
     }
 
-    async fn claim_active_batch(&mut self) {
-        let ids = self.active_batch_ids().to_vec();
-        if ids.is_empty() {
-            self.status = "Active batch empty · b to add, then A to claim".into();
+    /// Claim every function across **all** mass-batcher slots (not only active).
+    async fn claim_all_batches(&mut self) {
+        if self.total_batched() == 0 {
+            self.status = "All batches empty · b to add, then A to claim".into();
             return;
         }
         let Some(db) = &self.db else {
             return;
         };
-        let fns: Vec<ChaosFunction> = ids
-            .iter()
-            .filter_map(|id| {
-                self.id_index
+        // Preserve batch order; dedupe if the same id somehow appears twice.
+        let mut seen = HashSet::new();
+        let mut fns: Vec<ChaosFunction> = Vec::new();
+        for slot in &self.batches {
+            for id in slot {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                if let Some(f) = self
+                    .id_index
                     .get(id)
                     .and_then(|&i| db.functions.get(i))
                     .cloned()
-            })
-            .collect();
+                {
+                    fns.push(f);
+                }
+            }
+        }
+        let n_slots = self.batches.iter().filter(|b| !b.is_empty()).count();
+        if fns.is_empty() {
+            self.status = "No claimable functions in batches".into();
+            return;
+        }
+        self.status = format!(
+            "Claiming {} function(s) across {n_slots} batch(es)…",
+            fns.len()
+        );
         self.claim_functions(fns).await;
     }
 
@@ -3582,7 +3600,7 @@ chaos projects local-repo <id> /path/to/decomp \
                 self.claim_selected_function().await;
             }
             KeyCode::Char('a') if mods.contains(KeyModifiers::SHIFT) => {
-                self.claim_active_batch().await;
+                self.claim_all_batches().await;
             }
             // Shift+b = clear active batch (plain b toggles selected).
             KeyCode::Char('b') if mods.contains(KeyModifiers::SHIFT) => {
@@ -4948,7 +4966,7 @@ chaos projects local-repo <id> /path/to/decomp \
         let title = if self.claims_paste_open {
             " Claims  ·  paste API key [/ handle]  ·  enter save · esc cancel "
         } else {
-            " Claims  ·  live locks + try-lock  ·  i sign-in · L claim · A batch "
+            " Claims  ·  live locks + try-lock  ·  i sign-in · L claim · A all batches "
         };
         let border = if self
             .claims_session
@@ -4985,7 +5003,7 @@ chaos projects local-repo <id> /path/to/decomp \
             lines.push(String::new());
         } else {
             lines.push(
-                "Keys: i sign-in · o sign-out · L claim selected · A claim batch · y renew · x release · r refresh"
+                "Keys: i sign-in · o sign-out · L claim selected · A claim ALL batches · y renew · x release · r refresh"
                     .into(),
             );
             lines.push(String::new());

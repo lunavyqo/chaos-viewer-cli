@@ -51,7 +51,8 @@ Unpack and put `chaos` (or `chaos.exe`) on your `PATH`.
   prompt + user TOML under `~/.config/chaos/templates`)
 - Optional **pluggable claims** coordination: any HTTP coordinator via
   `project.claimsApi` (sm64ds uses tangos.dev) + `CLAIMS.md` merge; TUI can
-  **sign in / try-lock / renew / release** like the web viewer (`L` / `A` / Claims page)
+  **sign in / try-lock / renew / release** like the web viewer (`L` selected,
+  `A` all batches / Claims page)
 
 ## Requirements
 
