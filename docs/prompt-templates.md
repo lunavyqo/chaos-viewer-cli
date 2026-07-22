@@ -134,8 +134,12 @@ grok_terminal = "auto"            # auto | terminal | iterm | linux | windows
 - Full match text is written to `~/.config/chaos/last-agent-prompt.md` (and
   legacy `last-grok-prompt.md`). Agents get a short bootstrap pointing at that
   file so argv stays small.
+- **Mass batcher:** **`g`** opens one agent window per non-empty batch. Multi-batch
+  launches also write `last-agent-prompt-batchN.md` and
+  `last-agent-run-batchN.command` so concurrent windows do not overwrite each
+  other; the untagged paths still point at the last handoff.
 - Launcher script: `~/.config/chaos/last-agent-run.command` (macOS `open`).
-- Prompt is always copied to the clipboard as a fallback.
+- Prompt is always copied to the clipboard as a fallback (active / first batch).
 - In the picker, **`d`** saves `default_agent` for next **`g`**.
 
 ### New template flow

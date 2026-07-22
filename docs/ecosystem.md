@@ -130,8 +130,8 @@ flowchart TB
 | Screen | State changers |
 |--------|----------------|
 | Setup | source, project list, convention `v`, local_repo `r`, save/delete |
-| Overview | nav, filter `m`, sort `s`, search `/`, batch `b` |
-| Priorities | mode `n`, batch, jump |
+| Overview | nav, filter `m`, sort `s`, search `/`, batch `b`, mass-batcher `,`/`.` |
+| Priorities | mode `n`, batch, jump, mass-batcher |
 | Prompt | template `t`/`n`/`e`, drafts `d`/`h`, model `m`, reasoning `y`, harness `w`, copy `c`, agent `g` |
 | Claims | refresh `r` |
 | Global | pages 1–4, projects `p`, update atlas `u`, help `?` |

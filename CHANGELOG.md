@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mass batcher** — multiple prompt batches (1, 2, 3, …). Switch with **`,`** /
+  **`.`** (or **`<`** / **`>`**). **`+`** / **`=`** opens a new empty batch after
+  the active slot (no-op if active is already empty). Each slot still max 16
+  functions; adding past 16 also auto-opens the next batch. Badges show `[B3]`
+  for a single batch or `[2:3]` when multi. **`g`** / agent picker launch
+  **every non-empty batch** in its own agent window (preferred agent); handoff
+  files use `last-agent-prompt-batchN.md` so windows do not clobber each other.
+  **`c`** and the Prompt page still use the active slot; **Shift+b** clears the
+  active slot only.
+
 - **Priorities: Smallest functions** — new sub-list (cycle with `n`, or
   `chaos list --priority smallest`): unmatched, unclaimed, no floor, sorted by
   size ascending (whole-repo quick wins). Top 25, same filters as Biggest.

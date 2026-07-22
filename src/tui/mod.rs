@@ -24,7 +24,9 @@ use crate::claims::{load_claims, merge_locked_map, ClaimsSession};
 use crate::clipboard::copy_text;
 use crate::conventions::Convention;
 use crate::discover::sources_equivalent;
-use crate::grok_launch::{launch_agent, resolve_repo_cwd, AgentKind, GrokLaunchMode, TerminalHost};
+use crate::grok_launch::{
+    launch_agent_tagged, resolve_repo_cwd, AgentKind, GrokLaunchMode, TerminalHost,
+};
 use crate::load::{
     details_base_from_source, ensure_module_chunk, load_chaos_db_opts, load_function_detail,
     DataSource, DetailCache, DETAIL_PREWARM_CONCURRENCY,
@@ -410,7 +412,11 @@ struct App {
     priority_offset: usize,
     selected_id: Option<String>,
     detail: Option<FunctionDetail>,
-    batch: Vec<String>,
+    /// Mass batcher: one or more slots of ≤[`batch_max`] function ids.
+    /// Active slot drives Prompt / copy; `,` / `.` switch; overflow creates a new slot.
+    batches: Vec<Vec<String>>,
+    /// Index into [`Self::batches`] (always valid while `batches` is non-empty).
+    active_batch: usize,
     prompt_scroll: u16,
     /// Scroll offset for the Overview detail pane (lines from top).
     detail_scroll: u16,
@@ -514,7 +520,8 @@ impl App {
             priority_offset: 0,
             selected_id: None,
             detail: None,
-            batch: Vec::new(),
+            batches: vec![Vec::new()],
+            active_batch: 0,
             prompt_scroll: 0,
             detail_scroll: 0,
             detail_view_h: 8,
@@ -753,6 +760,14 @@ impl App {
                     action: "batch",
                 },
                 KeyHint {
+                    key: ",/.",
+                    action: "prev/next batch",
+                },
+                KeyHint {
+                    key: "+",
+                    action: "new empty batch",
+                },
+                KeyHint {
                     key: "S-b",
                     action: "clear batch",
                 },
@@ -773,6 +788,14 @@ impl App {
                 KeyHint {
                     key: "b",
                     action: "batch",
+                },
+                KeyHint {
+                    key: ",/.",
+                    action: "prev/next batch",
+                },
+                KeyHint {
+                    key: "+",
+                    action: "new empty batch",
                 },
                 KeyHint {
                     key: "S-b",
@@ -821,12 +844,20 @@ impl App {
                     action: "toggle Ghidra draft",
                 },
                 KeyHint {
+                    key: ",/.",
+                    action: "prev/next batch",
+                },
+                KeyHint {
+                    key: "+",
+                    action: "new empty batch",
+                },
+                KeyHint {
                     key: "c",
-                    action: "copy",
+                    action: "copy active",
                 },
                 KeyHint {
                     key: "g",
-                    action: "default agent",
+                    action: "launch all batches",
                 },
                 KeyHint {
                     key: "S-g",
@@ -834,7 +865,7 @@ impl App {
                 },
                 KeyHint {
                     key: "S-b",
-                    action: "clear batch",
+                    action: "clear active batch",
                 },
             ],
             Screen::Claims => vec![KeyHint {
@@ -874,12 +905,15 @@ GLOBAL
   p           projects hub (switch / add / remove saved repos)
   u           update progress (re-fetch chaos-db; matches can land mid-session)
   r           refresh claims only
-  c           copy batch prompt to clipboard (no-op if batch empty)
-  g           launch default agent (Prompt) · Shift+g agent picker
-  b           add/remove selected function from batch (max 16)
-  Shift+b     clear entire batch (unselect all)
-              Prompt page uses the batch only (not the Overview cursor)
-              batched rows show violet [B1] [B2] … badges in lists
+  c           copy active-batch prompt to clipboard (no-op if active empty)
+  g           launch default agent for ALL non-empty batches (Prompt)
+              · each batch opens a separate terminal window · Shift+g agent picker
+  b           add/remove selected function (per-batch max 16; overflow opens a new batch)
+  , / .       previous / next batch slot (mass batcher · also < / >)
+  + / =       open a new empty batch after the active slot and switch to it
+  Shift+b     clear active batch (empty trailing slots are pruned)
+              Prompt page uses the active batch only (not the Overview cursor)
+              badges: [B3] in a single batch, or [2:3] = batch 2 slot 3 when multi
 
 OVERVIEW
   top: modules (h/l) · functions (j/k) · m match filter · s module sort · / search
@@ -889,12 +923,16 @@ OVERVIEW
   pgup/pgdn   scroll the detail pane (j/k still move the function list)
   [ / ]       scroll detail one line
   b           toggle batch for selected function
-  Shift+b     clear entire batch
+  , / .       switch mass-batcher slot
+  + / =       new empty batch
+  Shift+b     clear active batch
 
 PRIORITIES
   n           cycle Nearly / Scaffolded / Biggest / Smallest
   j / k       move in ranked list
   enter       jump to Overview with that function selected
+  , / .       switch mass-batcher slot
+  + / =       new empty batch
 
 PROMPT
   j / k       scroll prompt text
@@ -911,10 +949,12 @@ PROMPT
               into experimental MATCH_RESULT so you do not retype them each try
   d           toggle stored near-miss / NONMATCHING drafts in prompt (off = disasm only)
   h           toggle Ghidra C draft in prompt (from local_repo/ghidra_out or details)
-  c           copy batch prompt
-  g           launch default coding agent (Grok/Codex/Claude/Antigravity)
-  Shift+g     agent picker · enter launch · d set default · esc close
-  Shift+b     clear entire batch
+  , / .       previous / next batch (Prompt rebuilds for the active slot)
+  + / =       new empty batch after active
+  c           copy active-batch prompt
+  g           launch default agent — one window per non-empty batch
+  Shift+g     agent picker · enter launch all · d set default · esc close
+  Shift+b     clear active batch
   experimental projects auto-select chaos-experimental when on chaos-viewer
 
 TOOLS
@@ -994,7 +1034,8 @@ Press ? or esc to close help."#
         self.source = Some(source);
         // Switching repo clears batch / selection noise (not on soft refresh).
         if !fresh {
-            self.batch.clear();
+            self.batches = vec![Vec::new()];
+            self.active_batch = 0;
             self.selected_id = None;
             self.detail = None;
             self.invalidate_detail_lines();
@@ -1263,7 +1304,8 @@ Press ? or esc to close help."#
 
         let prev_module = self.selected_module().map(str::to_string);
         let prev_id = self.selected_id.clone();
-        let prev_batch = self.batch.clone();
+        let prev_batches = self.batches.clone();
+        let prev_active_batch = self.active_batch;
         let prev_screen = self.screen;
         let prev_priority_mode = self.priority_mode;
 
@@ -1312,10 +1354,16 @@ Press ? or esc to close help."#
         }
 
         // Keep batch entries that still exist (matched/removed drop out).
-        self.batch = prev_batch
+        self.batches = prev_batches
             .into_iter()
-            .filter(|id| self.id_index.contains_key(id))
+            .map(|slot| {
+                slot.into_iter()
+                    .filter(|id| self.id_index.contains_key(id))
+                    .collect::<Vec<_>>()
+            })
             .collect();
+        self.active_batch = prev_active_batch;
+        self.normalize_batches();
 
         self.rebuild_priorities();
         self.detail = None;
@@ -1330,15 +1378,14 @@ Press ? or esc to close help."#
 
         if let Some(db) = &self.db {
             self.status = format!(
-                "Updated · {}/{} fn ({:.2}%) · {}/{} B ({:.2}%) · batch {}/{} · warming details…",
+                "Updated · {}/{} fn ({:.2}%) · {}/{} B ({:.2}%) · batch {} · warming details…",
                 db.stats.matched_functions,
                 db.stats.total_functions,
                 db.match_pct_functions(),
                 db.stats.matched_bytes,
                 db.stats.total_bytes,
                 db.match_pct_bytes(),
-                self.batch.len(),
-                crate::prompt::batch_max(),
+                self.batch_summary(),
             );
         }
         Ok(())
@@ -1783,10 +1830,11 @@ Press ? or esc to close help."#
     fn detail_cache_key(&self) -> String {
         let id = self.selected_id.as_deref().unwrap_or("");
         let has_det = self.detail.is_some();
-        let batch_n = self.batch_index(id).unwrap_or(0);
-        let batch_len = self.batch.len();
+        let (bi, pos) = self.batch_membership(id).unwrap_or((0, 0));
+        let n_batches = self.batches.len();
+        let active_len = self.active_batch_ids().len();
         let locked = self.locked_by.get(id).map(|s| s.as_str()).unwrap_or("");
-        format!("{id}|d={has_det}|b={batch_n}/{batch_len}|L={locked}")
+        format!("{id}|d={has_det}|b={bi}:{pos}/{n_batches}a{active_len}|L={locked}")
     }
 
     /// Cached until selection / detail / batch membership changes.
@@ -1880,19 +1928,20 @@ Press ? or esc to close help."#
         let Some(fn_) = self.selected_function() else {
             return " select a function above · b adds to batch ".into();
         };
-        if let Some(n) = self.batch_index(&fn_.id) {
+        if let Some((bi, pos)) = self.batch_membership(&fn_.id) {
+            let slot_len = self.batches.get(bi - 1).map(|b| b.len()).unwrap_or(0);
             format!(
-                " BATCHED [B{n}]  ·  {n}/{}  ·  b remove  ·  S-b clear  ·  c copy ",
-                self.batch.len()
+                " BATCHED [{bi}:{pos}]  ·  batch {bi}/{}  ·  {pos}/{slot_len}  ·  b remove  ·  ,/. switch  ·  S-b clear ",
+                self.batches.len()
             )
-        } else if self.batch.is_empty() {
+        } else if self.total_batched() == 0 {
             format!(
-                " not in batch  ·  b to add ({})  ·  Prompt uses batch only ",
+                " not in batch  ·  b to add ({})  ·  Prompt uses active batch only ",
                 self.batch_summary()
             )
         } else {
             format!(
-                " not in batch  ·  b to add ({})  ·  S-b clear batch ",
+                " not in batch  ·  b to add ({})  ·  ,/. switch  ·  S-b clear active ",
                 self.batch_summary()
             )
         }
@@ -2062,16 +2111,15 @@ Press ? or esc to close help."#
         }
     }
 
-    async fn rebuild_prompt(&mut self) {
+    /// Render a prompt for an arbitrary batch slot (used by mass-batcher launch).
+    async fn render_batch_prompt(&mut self, batch_ids: &[String]) -> String {
         let project = self.project();
         let opts = self.prompt_opts();
         let Some(db) = &self.db else {
-            self.prompt_text.clear();
-            return;
+            return String::new();
         };
 
-        let targets: Vec<ChaosFunction> = self
-            .batch
+        let targets: Vec<ChaosFunction> = batch_ids
             .iter()
             .filter_map(|id| {
                 self.id_index
@@ -2083,12 +2131,10 @@ Press ? or esc to close help."#
             .collect();
 
         if targets.is_empty() {
-            self.prompt_text = "Batch is empty.\n\n\
+            return "Batch is empty.\n\n\
 Add functions with b on Overview or Priorities \
-(max 16), then open Prompt (3) or press c to copy."
+(max 16 per batch; overflow opens batch 2, 3, …), then open Prompt (3) or press c to copy."
                 .into();
-            self.prompt_scroll = 0;
-            return;
         }
 
         let mut items: Vec<(ChaosFunction, Option<FunctionDetail>)> = Vec::new();
@@ -2116,11 +2162,15 @@ Add functions with b on Overview or Priorities \
         };
         self.prompt_template_id = id.clone();
         match self.template_store.render(&id, &project, &items, &opts) {
-            Ok(text) => self.prompt_text = text,
-            Err(e) => {
-                self.prompt_text = format!("Template error ({id}): {e:#}");
-            }
+            Ok(text) => text,
+            Err(e) => format!("Template error ({id}): {e:#}"),
         }
+    }
+
+    /// Rebuild the Prompt page from the **active batch only**.
+    async fn rebuild_prompt(&mut self) {
+        let ids = self.active_batch_ids().to_vec();
+        self.prompt_text = self.render_batch_prompt(&ids).await;
         self.prompt_scroll = 0;
     }
 
@@ -2163,6 +2213,65 @@ Add functions with b on Overview or Priorities \
         }
     }
 
+    /// Ids in the active mass-batcher slot.
+    fn active_batch_ids(&self) -> &[String] {
+        self.batches
+            .get(self.active_batch)
+            .map(|b| b.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn total_batched(&self) -> usize {
+        self.batches.iter().map(|b| b.len()).sum()
+    }
+
+    /// Ensure at least one batch slot and a valid `active_batch` index.
+    /// Drops empty slots except when every slot is empty (then leave a single empty).
+    fn normalize_batches(&mut self) {
+        if self.batches.is_empty() {
+            self.batches.push(Vec::new());
+            self.active_batch = 0;
+            return;
+        }
+        let any_nonempty = self.batches.iter().any(|b| !b.is_empty());
+        if any_nonempty {
+            // Keep empty slots the user is still looking at; only prune empties
+            // that are not the sole remaining slot when mixed with content is messy.
+            // Policy: keep all non-empty; if active is empty but others exist, keep it
+            // so switching still works; drop other empties.
+            let active = self.active_batch.min(self.batches.len() - 1);
+            let mut next = Vec::new();
+            let mut new_active = 0;
+            for (i, slot) in self.batches.drain(..).enumerate() {
+                if !slot.is_empty() || i == active {
+                    if i == active {
+                        new_active = next.len();
+                    }
+                    next.push(slot);
+                }
+            }
+            if next.is_empty() {
+                next.push(Vec::new());
+                new_active = 0;
+            }
+            self.batches = next;
+            self.active_batch = new_active.min(self.batches.len() - 1);
+        } else {
+            self.batches = vec![Vec::new()];
+            self.active_batch = 0;
+        }
+    }
+
+    /// `(batch_num 1-based, position 1-based)` if `id` is in any slot.
+    fn batch_membership(&self, id: &str) -> Option<(usize, usize)> {
+        for (bi, slot) in self.batches.iter().enumerate() {
+            if let Some(pos) = slot.iter().position(|x| x == id) {
+                return Some((bi + 1, pos + 1));
+            }
+        }
+        None
+    }
+
     async fn toggle_batch_selected(&mut self) {
         let Some(id) = self.selected_id.clone() else {
             self.status = "Nothing selected to batch · pick a function first".into();
@@ -2172,70 +2281,194 @@ Add functions with b on Overview or Priorities \
             .selected_function()
             .map(|f| f.name.clone())
             .unwrap_or_else(|| id.clone());
-        if let Some(pos) = self.batch.iter().position(|x| x == &id) {
-            self.batch.remove(pos);
+
+        // Toggle off if present in any batch.
+        if let Some((bi, pos)) = self.batch_membership(&id) {
+            let slot_i = bi - 1;
+            if let Some(slot) = self.batches.get_mut(slot_i) {
+                if pos - 1 < slot.len() {
+                    slot.remove(pos - 1);
+                }
+            }
+            self.normalize_batches();
             self.status = format!(
-                "Removed {name} from batch · now {}/{}",
-                self.batch.len(),
-                batch_max()
+                "Removed {name} from batch {bi} · now {}",
+                self.batch_summary()
             );
-        } else if self.batch.len() < batch_max() {
-            self.batch.push(id);
-            self.status = format!(
-                "Batched {name} · {}/{}  (B badge in lists)",
-                self.batch.len(),
-                batch_max()
-            );
-        } else {
-            self.status = format!("Batch full ({}/{})", self.batch.len(), batch_max());
+            self.invalidate_detail_lines();
+            self.rebuild_prompt().await;
+            return;
         }
+
+        // Prefer adding to the active slot; if full, spill into the next non-full
+        // slot or create a new batch automatically (mass batcher).
+        self.normalize_batches();
+        let max = batch_max();
+        let mut target = self.active_batch.min(self.batches.len() - 1);
+        if self.batches[target].len() >= max {
+            // Search forward (wrap) for a non-full slot.
+            let n = self.batches.len();
+            let mut found = None;
+            for step in 1..=n {
+                let i = (target + step) % n;
+                if self.batches[i].len() < max {
+                    found = Some(i);
+                    break;
+                }
+            }
+            if let Some(i) = found {
+                target = i;
+            } else {
+                self.batches.push(Vec::new());
+                target = self.batches.len() - 1;
+            }
+            self.active_batch = target;
+        }
+
+        // Note emptiness before the push so overflow can report "opened batch N".
+        let was_empty_slot = self.batches[target].is_empty();
+        self.batches[target].push(id);
+        self.active_batch = target;
+        let pos = self.batches[target].len();
+        let bi = target + 1;
+        self.status = if was_empty_slot && self.batches.len() > 1 && bi > 1 {
+            format!("Batched {name} · opened batch {bi} · 1/{max} (overflow past {max})")
+        } else if self.batches.len() > 1 {
+            format!(
+                "Batched {name} · batch {bi}/{} · {pos}/{max} · ,/. switch",
+                self.batches.len()
+            )
+        } else {
+            format!("Batched {name} · {pos}/{max}  (B badge in lists)")
+        };
         self.invalidate_detail_lines();
         self.rebuild_prompt().await;
     }
 
-    /// Remove every function from the prompt batch (web “clear”).
+    /// Clear the active mass-batcher slot (web “clear”).
     async fn clear_batch(&mut self) {
-        if self.batch.is_empty() {
+        self.normalize_batches();
+        let n = self.active_batch_ids().len();
+        if n == 0 && self.total_batched() == 0 {
             self.status = "Batch already empty".into();
             return;
         }
-        let n = self.batch.len();
-        self.batch.clear();
+        if n == 0 {
+            self.status = format!(
+                "Active batch {} already empty · ,/. switch · total {} fn",
+                self.active_batch + 1,
+                self.total_batched()
+            );
+            return;
+        }
+        let bi = self.active_batch + 1;
+        if let Some(slot) = self.batches.get_mut(self.active_batch) {
+            slot.clear();
+        }
+        self.normalize_batches();
         self.invalidate_detail_lines();
         self.rebuild_prompt().await;
-        self.status = format!("Cleared batch · removed {n} function(s)");
+        self.status = format!(
+            "Cleared batch {bi} · removed {n} function(s) · now {}",
+            self.batch_summary()
+        );
     }
 
-    /// 1-based position in the prompt batch, if present.
-    fn batch_index(&self, id: &str) -> Option<usize> {
-        self.batch.iter().position(|x| x == id).map(|i| i + 1)
+    /// Switch mass-batcher slot (`delta` = ±1). Wraps around.
+    async fn cycle_batch_slot(&mut self, delta: isize) {
+        self.normalize_batches();
+        let n = self.batches.len() as isize;
+        if n <= 1 {
+            self.status = format!(
+                "Only one batch · {} · + new empty · overflow past {} auto-opens more",
+                self.batch_summary(),
+                batch_max()
+            );
+            return;
+        }
+        let cur = self.active_batch as isize;
+        let next = (cur + delta).rem_euclid(n) as usize;
+        self.active_batch = next;
+        self.invalidate_detail_lines();
+        self.rebuild_prompt().await;
+        self.status = format!(
+            "Active batch {}/{} · {}/{} · {} total fn · ,/. switch · + new",
+            self.active_batch + 1,
+            self.batches.len(),
+            self.active_batch_ids().len(),
+            batch_max(),
+            self.total_batched()
+        );
+    }
+
+    /// Manually open a new empty batch after the active slot and switch to it.
+    ///
+    /// No-op (with status) if the active slot is already empty — avoids a stack
+    /// of empty slots that [`normalize_batches`] would prune anyway.
+    async fn new_empty_batch(&mut self) {
+        self.normalize_batches();
+        if self.active_batch_ids().is_empty() {
+            self.status = format!(
+                "Already on empty batch {}/{} · b to fill · ,/. switch",
+                self.active_batch + 1,
+                self.batches.len()
+            );
+            return;
+        }
+        let insert_at = self.active_batch + 1;
+        self.batches.insert(insert_at, Vec::new());
+        self.active_batch = insert_at;
+        self.invalidate_detail_lines();
+        self.rebuild_prompt().await;
+        self.status = format!(
+            "New empty batch {}/{} · b to add · ,/. switch · S-b clear",
+            self.active_batch + 1,
+            self.batches.len()
+        );
     }
 
     fn batch_badge_spans(&self, id: &str, bg: Color) -> Vec<Span<'static>> {
-        if let Some(n) = self.batch_index(id) {
-            vec![Span::styled(
-                format!("[B{n}] "),
-                paint_bold_on(self.theme.batch, bg),
-            )]
+        if let Some((bi, pos)) = self.batch_membership(id) {
+            let label = if self.batches.len() <= 1 {
+                format!("[B{pos}] ")
+            } else {
+                format!("[{bi}:{pos}] ")
+            };
+            vec![Span::styled(label, paint_bold_on(self.theme.batch, bg))]
         } else {
             Vec::new()
         }
     }
 
     fn batch_summary(&self) -> String {
-        format!("{}/{}", self.batch.len(), batch_max())
+        let cur = self.active_batch_ids().len();
+        let max = batch_max();
+        if self.batches.len() <= 1 {
+            format!("{cur}/{max}")
+        } else {
+            format!(
+                "{}/{} · {}/{} ({} fn)",
+                self.active_batch + 1,
+                self.batches.len(),
+                cur,
+                max,
+                self.total_batched()
+            )
+        }
     }
 
     fn copy_prompt(&mut self) {
-        if self.batch.is_empty() {
-            self.status = "Nothing to copy · batch is empty (press b to add functions)".into();
+        if self.active_batch_ids().is_empty() {
+            self.status =
+                "Nothing to copy · active batch empty (press b to add · ,/. switch)".into();
             return;
         }
         match copy_text(&self.prompt_text) {
             Ok(()) => {
                 self.status = format!(
-                    "Prompt copied · {} function(s) from batch",
-                    self.batch.len()
+                    "Prompt copied · batch {} · {} function(s)",
+                    self.active_batch + 1,
+                    self.active_batch_ids().len()
                 );
             }
             Err(e) => {
@@ -2277,7 +2510,7 @@ Add functions with b on Overview or Priorities \
     }
 
     fn open_agent_picker(&mut self) {
-        if self.batch.is_empty() {
+        if self.total_batched() == 0 {
             self.status =
                 "Nothing to send · batch empty (b to add, then g / Shift+g on Prompt)".into();
             return;
@@ -2285,7 +2518,9 @@ Add functions with b on Overview or Priorities \
         let def = self.default_agent();
         self.agent_picker_sel = def.index();
         self.agent_picker_open = true;
-        self.status = "Agent picker · j/k select · enter launch · d set default · esc close".into();
+        let n = self.batches.iter().filter(|b| !b.is_empty()).count();
+        self.status =
+            format!("Agent picker · j/k · enter launch {n} batch window(s) · d set default · esc");
     }
 
     fn open_model_picker(&mut self) {
@@ -2296,17 +2531,22 @@ Add functions with b on Overview or Priorities \
             "Model picker · j/k select · enter use · esc close · prefills MATCH_RESULT".into();
     }
 
-    /// Open the chosen coding agent in a **separate terminal** (chaos stays running).
-    fn queue_agent_launch(&mut self, agent: AgentKind) {
-        if self.batch.is_empty() {
+    /// Open the preferred coding agent in a **separate terminal per non-empty batch**.
+    async fn queue_agent_launch(&mut self, agent: AgentKind) {
+        self.normalize_batches();
+        let non_empty: Vec<usize> = self
+            .batches
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !b.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        if non_empty.is_empty() {
             self.status =
                 "Nothing to send · batch empty (b to add, then g / Shift+g on Prompt)".into();
             return;
         }
-        if self.prompt_text.trim().is_empty() {
-            self.status = "Prompt empty · open Prompt (3) first so it can rebuild".into();
-            return;
-        }
+
         let cfg = &self.template_store.config;
         let grok_mode = cfg
             .grok_mode
@@ -2335,53 +2575,106 @@ Add functions with b on Overview or Priorities \
         );
         let bin_override = self.agent_bin_override(agent).map(str::to_string);
         let extra = self.agent_extra_args(agent).to_vec();
-        // Also copy so the user can paste if launch fails.
-        let _ = copy_text(&self.prompt_text);
-        match launch_agent(
-            agent,
-            &self.prompt_text,
-            bin_override.as_deref(),
-            repo_cwd.clone(),
-            &extra,
-            terminal,
-            grok_mode,
-        ) {
-            Ok(report) => {
-                let repo = report
-                    .repo_cwd
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| {
-                        "no local_repo — set: chaos projects local-repo <id> <path>".into()
-                    });
-                self.status = format!(
-                    "{} opened via {} · {} fn · cwd {} · look for a NEW Terminal window \
-(or: open ~/.config/chaos/last-agent-run.command)",
-                    agent.label(),
-                    report.terminal,
-                    self.batch.len(),
-                    repo,
-                );
-                if report.repo_cwd.is_none() {
-                    self.error = Some(
-                        "No local decomp path. Set per project: \
-chaos projects local-repo <id> /path/to/decomp \
-(or grok_default_repo in config.toml)."
-                            .into(),
-                    );
-                } else {
-                    self.error = None;
-                }
-                self.agent_picker_open = false;
+        let multi = non_empty.len() > 1;
+
+        let mut opened = 0usize;
+        let mut total_fn = 0usize;
+        let mut last_terminal = String::new();
+        let mut last_repo = repo_cwd.clone();
+        let mut errors: Vec<String> = Vec::new();
+        let mut first_prompt: Option<String> = None;
+
+        for &bi in &non_empty {
+            let ids = self.batches[bi].clone();
+            let n_fn = ids.len();
+            let prompt = self.render_batch_prompt(&ids).await;
+            if prompt.trim().is_empty() || prompt.starts_with("Batch is empty") {
+                errors.push(format!("batch {}: empty prompt", bi + 1));
+                continue;
             }
-            Err(e) => {
-                self.error = Some(format!("{e:#}"));
-                self.status = format!(
-                    "{} launch failed (prompt still copied if clipboard ok)",
-                    agent.label()
-                );
+            if first_prompt.is_none() {
+                first_prompt = Some(prompt.clone());
+            }
+            let tag_owned = if multi {
+                Some(format!("batch{}", bi + 1))
+            } else {
+                None
+            };
+            match launch_agent_tagged(
+                agent,
+                &prompt,
+                bin_override.as_deref(),
+                repo_cwd.clone(),
+                &extra,
+                terminal,
+                grok_mode,
+                tag_owned.as_deref(),
+            ) {
+                Ok(report) => {
+                    opened += 1;
+                    total_fn += n_fn;
+                    last_terminal = report.terminal;
+                    last_repo = report.repo_cwd;
+                }
+                Err(e) => {
+                    errors.push(format!("batch {}: {e:#}", bi + 1));
+                }
             }
         }
+
+        // Clipboard fallback: active (or first) prompt.
+        if let Some(p) = first_prompt {
+            let _ = copy_text(&p);
+        }
+        // Keep the Prompt page on the active slot.
+        self.rebuild_prompt().await;
+
+        let repo = last_repo
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "no local_repo — set: chaos projects local-repo <id> <path>".into());
+
+        if opened == 0 {
+            self.error = Some(errors.join(" · "));
+            self.status = format!(
+                "{} launch failed for all {} batch(es) (prompt still copied if clipboard ok)",
+                agent.label(),
+                non_empty.len()
+            );
+            return;
+        }
+
+        if multi {
+            self.status = format!(
+                "{} · opened {opened}/{} windows via {last_terminal} · {total_fn} fn total · cwd {repo} \
+· handoff last-agent-prompt-batchN.md",
+                agent.label(),
+                non_empty.len(),
+            );
+        } else {
+            self.status = format!(
+                "{} opened via {last_terminal} · {total_fn} fn · cwd {repo} · look for a NEW Terminal window \
+(or: open ~/.config/chaos/last-agent-run.command)",
+                agent.label(),
+            );
+        }
+        if let Some(first_err) = errors.first() {
+            self.error = Some(format!(
+                "Some batches failed ({}/{} ok): {first_err}",
+                opened,
+                non_empty.len()
+            ));
+        } else if last_repo.is_none() {
+            self.error = Some(
+                "No local decomp path. Set per project: \
+chaos projects local-repo <id> /path/to/decomp \
+(or grok_default_repo in config.toml)."
+                    .into(),
+            );
+        } else {
+            self.error = None;
+        }
+        self.agent_picker_open = false;
     }
 
     fn set_default_agent_from_picker(&mut self) {
@@ -2461,8 +2754,7 @@ chaos projects local-repo <id> /path/to/decomp \
                         .get(self.agent_picker_sel)
                         .copied()
                         .unwrap_or_default();
-                    self.rebuild_prompt().await;
-                    self.queue_agent_launch(agent);
+                    self.queue_agent_launch(agent).await;
                 }
                 _ => {}
             }
@@ -2890,12 +3182,22 @@ chaos projects local-repo <id> /path/to/decomp \
                 if mods.contains(KeyModifiers::SHIFT) {
                     self.open_agent_picker();
                 } else {
-                    self.rebuild_prompt().await;
                     let agent = self.default_agent();
-                    self.queue_agent_launch(agent);
+                    self.queue_agent_launch(agent).await;
                 }
             }
-            // Shift+b = clear entire batch (plain b toggles selected).
+            // Mass batcher: , / . (and < / >) switch active batch slot.
+            KeyCode::Char(',') | KeyCode::Char('<') => {
+                self.cycle_batch_slot(-1).await;
+            }
+            KeyCode::Char('.') | KeyCode::Char('>') => {
+                self.cycle_batch_slot(1).await;
+            }
+            // + / = open a new empty batch after the active slot.
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.new_empty_batch().await;
+            }
+            // Shift+b = clear active batch (plain b toggles selected).
             KeyCode::Char('b') if mods.contains(KeyModifiers::SHIFT) => {
                 self.clear_batch().await;
             }
@@ -3529,7 +3831,7 @@ chaos projects local-repo <id> /path/to/decomp \
             } else {
                 db.generated_at.as_str()
             };
-            let batch_bit = if self.batch.is_empty() {
+            let batch_bit = if self.total_batched() == 0 {
                 format!("batch {}", self.batch_summary())
             } else {
                 format!("batch {} ★", self.batch_summary())
@@ -3926,7 +4228,7 @@ chaos projects local-repo <id> /path/to/decomp \
                 } else {
                     self.theme.unmatched
                 };
-                let in_batch = self.batch_index(&f.id).is_some();
+                let in_batch = self.batch_membership(&f.id).is_some();
                 let name_fg = if selected {
                     self.theme.accent
                 } else if in_batch {
@@ -3952,11 +4254,12 @@ chaos projects local-repo <id> /path/to/decomp \
                 Line::from(spans)
             })
             .collect();
-        // Batch count in *this module* is O(batch), not O(all functions).
+        // Batch count in *this module* is O(batched), not O(all functions).
         let mod_name = self.selected_module();
         let batched_here = self
-            .batch
+            .batches
             .iter()
+            .flatten()
             .filter(|id| {
                 self.id_index
                     .get(id.as_str())
@@ -3967,7 +4270,7 @@ chaos projects local-repo <id> /path/to/decomp \
         let filter = self.match_filter.label();
         let title = if self.search.is_empty() {
             format!(
-                " Functions ({}) · {filter} · batch {} ({} here) · m filter · j/k / b ",
+                " Functions ({}) · {filter} · batch {} ({} here) · m · b · ,/. ",
                 self.fn_list.len(),
                 self.batch_summary(),
                 batched_here
@@ -3989,7 +4292,7 @@ chaos projects local-repo <id> /path/to/decomp \
     fn draw_priorities(&mut self, f: &mut Frame, area: Rect) {
         let Some(db) = &self.db else { return };
         let title = format!(
-            " {}  ·  {} rows  ·  batch {}  ·  n cycle · enter · b ",
+            " {}  ·  {} rows  ·  batch {}  ·  n cycle · enter · b · ,/. ",
             self.priority_mode.label(),
             self.priority_list.len(),
             self.batch_summary()
@@ -4017,7 +4320,7 @@ chaos projects local-repo <id> /path/to/decomp \
                     PriorityMode::Scaffolded => format!("sim={:.2}", f.sim.unwrap_or(0.0)),
                     PriorityMode::Biggest | PriorityMode::Smallest => format!("{}B", f.size),
                 };
-                let in_batch = self.batch_index(&f.id).is_some();
+                let in_batch = self.batch_membership(&f.id).is_some();
                 let name_fg = if selected {
                     self.theme.accent
                 } else if in_batch {
@@ -4053,7 +4356,7 @@ chaos projects local-repo <id> /path/to/decomp \
         let has_fn = self.selected_function().is_some();
         let batched = self
             .selected_function()
-            .and_then(|f| self.batch_index(&f.id));
+            .and_then(|f| self.batch_membership(&f.id));
         let footer = self.detail_batch_footer();
 
         let body = self.detail_pane_lines().join("\n");
@@ -4142,15 +4445,31 @@ chaos projects local-repo <id> /path/to/decomp \
 
     fn draw_prompt(&self, f: &mut Frame, area: Rect) {
         let bg = self.theme.bg;
-        let roster: String = if self.batch.is_empty() {
-            "batch empty — press b on Overview or Priorities to add functions".into()
+        let active_ids = self.active_batch_ids();
+        let roster: String = if active_ids.is_empty() {
+            if self.total_batched() == 0 {
+                "batch empty — press b on Overview or Priorities · overflow past 16 opens batch 2+"
+                    .into()
+            } else {
+                format!(
+                    "active batch {} empty — ,/. switch · {} fn in other batch(es)",
+                    self.active_batch + 1,
+                    self.total_batched()
+                )
+            }
         } else if let Some(db) = &self.db {
-            self.batch
+            let bi = self.active_batch + 1;
+            active_ids
                 .iter()
                 .enumerate()
                 .filter_map(|(i, id)| {
-                    db.find_by_id(id)
-                        .map(|f| format!("[B{}] {}", i + 1, f.name))
+                    db.find_by_id(id).map(|f| {
+                        if self.batches.len() <= 1 {
+                            format!("[B{}] {}", i + 1, f.name)
+                        } else {
+                            format!("[{bi}:{}] {}", i + 1, f.name)
+                        }
+                    })
                 })
                 .collect::<Vec<_>>()
                 .join("  ·  ")
@@ -4165,7 +4484,7 @@ chaos projects local-repo <id> /path/to/decomp \
             )
         } else {
             format!(
-                " Prompt  ·  {}  ·  batch {}  ·  {}/{}  {}  ·  drafts:{}  Ghidra:{}  ·  m y w · d · h · t · c ",
+                " Prompt  ·  {}  ·  batch {}  ·  {}/{}  {}  ·  drafts:{}  Ghidra:{}  ·  ,/. · + · g all · c ",
                 self.prompt_template_label(),
                 self.batch_summary(),
                 self.template_store.provenance_model(),
@@ -4183,7 +4502,7 @@ chaos projects local-repo <id> /path/to/decomp \
                 },
             )
         };
-        let border = if self.batch.is_empty() {
+        let border = if active_ids.is_empty() {
             self.theme.border
         } else {
             self.theme.batch
@@ -4198,7 +4517,7 @@ chaos projects local-repo <id> /path/to/decomp \
             .constraints([Constraint::Length(2), Constraint::Min(1)])
             .split(inner);
 
-        let roster_fg = if self.batch.is_empty() {
+        let roster_fg = if active_ids.is_empty() {
             self.theme.muted
         } else {
             self.theme.batch
