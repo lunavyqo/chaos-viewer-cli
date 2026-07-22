@@ -1014,9 +1014,20 @@ you may use: python tools/claims.py lock --module … --start 0x… --end 0x…"
         "  - Do not expand into unclaimed ranges without claiming them first.".into(),
         String::new(),
         "WHEN FINISHED (match, near-miss park, give-up, or session end) — MANDATORY:".into(),
-        "  1. Release every API lock you took (POST …/release or tools/claims.py release).".into(),
-        "  2. Update CLAIMS.md: set status to done / released / remove the row. \
-Do not leave stale active rows."
+        "  1. CLAIMS after a BYTE-IDENTICAL MATCH (verify reports MATCH):".into(),
+        "     - Do NOT unclaim / release / drop the claim for that function.".into(),
+        "     - Keep credit: set CLAIMS.md status to **done** (or equivalent), \
+with a short note that it matched — never status=released and never delete \
+the row as if you abandoned the work."
+            .into(),
+        "     - If the live API still holds a lock on a fully matched range, \
+prefer leaving credit intact (done) over release; do **not** unclaim a match."
+            .into(),
+        "  2. CLAIMS after give-up / no match / session end without MATCH:".into(),
+        "     - Release every API lock you took (POST …/release or tools/claims.py release)."
+            .into(),
+        "     - Update CLAIMS.md: status=released (or remove the row). \
+Do not leave stale active rows on abandoned work."
             .into(),
         "  3. Stop every decomp-permuter process you started (see below).".into(),
     ];
@@ -1371,6 +1382,8 @@ mod tests {
         assert!(text.contains("REQUIRED — CLAIMS"));
         assert!(text.contains("CLAIMS.md"));
         assert!(text.contains("BEFORE matching"));
+        assert!(text.contains("Do NOT unclaim") || text.contains("do NOT unclaim"));
+        assert!(text.contains("BYTE-IDENTICAL MATCH"));
         assert!(text.contains("REQUIRED — PERMUTER"));
         assert!(
             text.contains("PROCESS TREE")
