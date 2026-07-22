@@ -744,9 +744,12 @@ files — even if present."
         );
     }
     lines.push(String::new());
+    // Keep this shared block free of experimental MATCH_RESULT / provenance
+    // jargon — default (chaos-viewer / sm64ds) must not mention those fields.
+    // Experimental templates restate draft trackers in their own header/footer.
     lines.push(
         "If both OFF: fresh try from TARGET DISASSEMBLY only. \
-MATCH_RESULT usedNearMissDraft / usedGhidraDraft must match what you actually used (and policy)."
+Respect the USE / MUST NOT rules above for every attempt."
             .into(),
     );
     lines.join("\n")
@@ -1208,6 +1211,32 @@ mod tests {
         assert!(!text.contains("YOUR_GITHUB_LOGIN"));
         // method block has no by:
         assert!(!text.contains("\n    by:"));
+    }
+
+    #[test]
+    fn default_builtin_prompt_has_no_experimental_match_result_jargon() {
+        // Regression: draft policy / shared header must not leak MATCH_RESULT
+        // trackers into the default chaos-viewer (sm64ds) template.
+        let project = sample_project();
+        let fn_ = sample_fn();
+        let text = build_builtin_prompt(&project, &[(fn_, None)], &PromptOptions::default());
+        for banned in [
+            "MATCH_RESULT",
+            "matchProvenance",
+            "usedNearMissDraft",
+            "usedGhidraDraft",
+            "sessionScope",
+            "log_attempt",
+            "stamp_provenance",
+            "EXPERIMENTAL —",
+        ] {
+            assert!(
+                !text.contains(banned),
+                "default prompt must not contain experimental jargon {banned:?}"
+            );
+        }
+        assert!(text.contains("DRAFT POLICY"));
+        assert!(text.contains("Respect the USE / MUST NOT rules"));
     }
 
     #[test]

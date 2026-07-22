@@ -258,7 +258,7 @@ pub fn with_repo_preamble(prompt: &str, repo: Option<&Path>) -> String {
             format!(
                 "LOCAL DECOMP REPOSITORY (on this machine — work only inside this tree):\n\
                  {abs}\n\
-                 Use this as the working directory for all tools, bank/log_attempt, \
+                 Use this as the working directory for all tools (match, bank, …) \
                  and relative paths (src/, tools/, config/).\n\
                  Do not invent another clone path.\n\
                  \n\
