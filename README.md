@@ -41,11 +41,14 @@ Unpack and put `chaos` (or `chaos.exe`) on your `PATH`.
 - **Tools page (`5`)**: card catalog of typical decomp instruments (what each
   does / changes); ★ when found under project `local_repo`
 - Priority lists: nearly done, best scaffolded, biggest / smallest unmatched
-- Prompt builder (batch, max 16) with clipboard copy, **`g`** / **`Shift+g`** to
-  launch **Grok / Codex / Claude / Antigravity** in a separate terminal (set
-  `local_repo` per project; default agent configurable), and **`Shift+b`** clear
-  batch; **multiple templates** (built-in `chaos-viewer` + experimental
-  provenance prompt + user TOML under `~/.config/chaos/templates`)
+- Prompt builder with **mass batcher** (multiple slots of max 16; **`,`**/**`.`**
+  switch; **`+`** new empty batch; overflow auto-opens batch 2+), clipboard copy
+  of the active slot,
+  **`g`** / **`Shift+g`** to launch **Grok / Codex / Claude / Antigravity** —
+  one separate terminal window per non-empty batch (set `local_repo` per
+  project; default agent configurable), and **`Shift+b`** clear active batch;
+  **multiple templates** (built-in `chaos-viewer` + experimental provenance
+  prompt + user TOML under `~/.config/chaos/templates`)
 - Optional **pluggable claims** coordination: any HTTP coordinator via
   `project.claimsApi` (not hardcoded to one host) + `CLAIMS.md` merge
 

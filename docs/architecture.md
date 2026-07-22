@@ -252,7 +252,7 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-  BATCH2["Batch ≤16 functions"] --> DET["Load details for each"]
+  BATCH2["Mass batcher: slots of ≤16 · g launches each"] --> DET["Load details for each"]
   DET --> DRAFT{"near-miss draft on?"}
   DET --> GH{"Ghidra on + file?"}
   DRAFT -->|yes| NM["NEAR-MISS block"]
