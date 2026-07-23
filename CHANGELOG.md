@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Clear all batches** — **`Ctrl+b`** wipes every mass-batcher slot (back to one
+  empty batch). **`Shift+b`** still clears only the active slot.
+
 ### Changed
 
 - **Experimental tracking is now default** — stock `chaos-viewer` prompt includes
