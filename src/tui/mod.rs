@@ -795,10 +795,6 @@ impl App {
                 },
                 KeyHint {
                     key: "S-b",
-                    action: "clear",
-                },
-                KeyHint {
-                    key: "C-b",
                     action: "clear-all",
                 },
             ],
@@ -825,10 +821,6 @@ impl App {
                 },
                 KeyHint {
                     key: "S-b",
-                    action: "clear",
-                },
-                KeyHint {
-                    key: "C-b",
                     action: "clear-all",
                 },
             ],
@@ -867,10 +859,6 @@ impl App {
                 },
                 KeyHint {
                     key: "S-b",
-                    action: "clear",
-                },
-                KeyHint {
-                    key: "C-b",
                     action: "clear-all",
                 },
             ],
@@ -937,8 +925,9 @@ GLOBAL
   b           add/remove selected function (per-batch max 16; overflow opens a new batch)
   , / .       previous / next batch slot (mass batcher · also < / >)
   + / =       open a new empty batch after the active slot and switch to it
-  Shift+b     clear active batch (empty trailing slots are pruned)
-  Ctrl+b      clear ALL mass-batcher slots (back to one empty batch)
+  Shift+b     clear ALL mass-batcher slots (every badge gone · one empty slot)
+  Ctrl+b      same as Shift+b (alias; may be eaten by tmux — prefer Shift+b)
+  Shift+Del   clear active slot only
               Prompt page uses the active batch only (not the Overview cursor)
               badges: [B3] in a single batch, or [2:3] = batch 2 slot 3 when multi
 
@@ -952,8 +941,8 @@ OVERVIEW
   b           toggle batch for selected function
   , / .       switch mass-batcher slot
   + / =       new empty batch
-  Shift+b     clear active batch
-  Ctrl+b      clear all batches
+  Shift+b     clear ALL batches
+  Shift+Del   clear active slot only
 
 PRIORITIES
   n           cycle Nearly / Scaffolded / Biggest / Smallest
@@ -982,8 +971,8 @@ PROMPT
   c           copy active-batch prompt
   g           launch default agent — one window per non-empty batch
   Shift+g     agent picker · enter launch all · d set default · esc close
-  Shift+b     clear active batch
-  Ctrl+b      clear all batches
+  Shift+b     clear ALL batches
+  Shift+Del   clear active slot only
   stock prompts always include provenance / attempt tree (experimental merged)
 
 CLAIMS (page 4 — live locks via project.claimsApi, e.g. https://tangos.dev/api/claims)
@@ -2285,7 +2274,7 @@ or Discord: DM bot `key` · enter when ready"
         if let Some((bi, pos)) = self.batch_membership(&fn_.id) {
             let slot_len = self.batches.get(bi - 1).map(|b| b.len()).unwrap_or(0);
             format!(
-                " BATCHED [{bi}:{pos}]  ·  batch {bi}/{}  ·  {pos}/{slot_len}  ·  b remove  ·  ,/. switch  ·  S-b clear ",
+                " BATCHED [{bi}:{pos}]  ·  batch {bi}/{}  ·  {pos}/{slot_len}  ·  b remove  ·  S-b clear-all ",
                 self.batches.len()
             )
         } else if self.total_batched() == 0 {
@@ -2295,7 +2284,7 @@ or Discord: DM bot `key` · enter when ready"
             )
         } else {
             format!(
-                " not in batch  ·  b to add ({})  ·  ,/. switch  ·  S-b clear active ",
+                " not in batch  ·  b to add ({})  ·  ,/. switch  ·  S-b clear-all ",
                 self.batch_summary()
             )
         }
@@ -2709,7 +2698,7 @@ Add functions with b on Overview or Priorities \
         }
         if n == 0 {
             self.status = format!(
-                "Active batch {} already empty · ,/. switch · total {} fn · C-b clear all",
+                "Active batch {} already empty · ,/. switch · total {} fn · S-b clear ALL",
                 self.active_batch + 1,
                 self.total_batched()
             );
@@ -2723,25 +2712,33 @@ Add functions with b on Overview or Priorities \
         self.invalidate_detail_lines();
         self.rebuild_prompt().await;
         self.status = format!(
-            "Cleared batch {bi} · removed {n} function(s) · now {} · C-b clear all",
+            "Cleared active batch {bi} · removed {n} · now {} · S-b clears ALL slots",
             self.batch_summary()
         );
     }
 
     /// Wipe every mass-batcher slot (back to a single empty batch).
+    /// All `[B…]` / `[n:m]` badges disappear; active slot resets to 1.
     async fn clear_all_batches(&mut self) {
         let total = self.total_batched();
-        let slots = self.batches.len();
-        if total == 0 && slots <= 1 {
+        let slots = self.batches.iter().filter(|s| !s.is_empty()).count().max(1);
+        if total == 0 {
+            self.batches = vec![Vec::new()];
+            self.active_batch = 0;
+            self.invalidate_detail_lines();
+            self.rebuild_prompt().await;
             self.status = "All batches already empty".into();
             return;
         }
-        self.batches = vec![Vec::new()];
+        // Drop every slot completely — not just the active one.
+        self.batches.clear();
+        self.batches.push(Vec::new());
         self.active_batch = 0;
         self.invalidate_detail_lines();
         self.rebuild_prompt().await;
-        self.status =
-            format!("Cleared all batches · removed {total} function(s) across {slots} slot(s)");
+        self.status = format!(
+            "Cleared ALL batches · removed {total} function(s) from {slots} slot(s) · badges cleared"
+        );
     }
 
     /// Switch mass-batcher slot (`delta` = ±1). Wraps around.
@@ -3598,11 +3595,15 @@ chaos projects local-repo <id> /path/to/decomp \
             KeyCode::Char('a') if mods.contains(KeyModifiers::SHIFT) => {
                 self.claim_all_batches().await;
             }
-            // Ctrl+b = clear ALL batches; Shift+b = clear active; plain b toggles.
-            KeyCode::Char('b') if mods.contains(KeyModifiers::CONTROL) => {
+            // Clear-all must not rely only on Ctrl+b (tmux prefix / terminals eat it).
+            // Shift+b and Ctrl+b both wipe every mass-batcher slot.
+            // Shift+Backspace clears only the active slot.
+            KeyCode::Char('b')
+                if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::SHIFT) =>
+            {
                 self.clear_all_batches().await;
             }
-            KeyCode::Char('b') if mods.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Backspace | KeyCode::Delete if mods.contains(KeyModifiers::SHIFT) => {
                 self.clear_batch().await;
             }
             KeyCode::Char('b') => self.toggle_batch_selected().await,

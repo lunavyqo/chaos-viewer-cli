@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Clear all batches** — **`Ctrl+b`** wipes every mass-batcher slot (back to one
-  empty batch). **`Shift+b`** still clears only the active slot. Footer key row
-  is compacted and width-capped so `C-b clear-all` stays on-screen.
+- **Clear all batches** — **`Shift+b`** (and **`Ctrl+b`**) wipe **every**
+  mass-batcher slot so all badges disappear. **`Shift+Delete`** clears only the
+  active slot. (Ctrl+b alone was unreliable under tmux / some terminals.)
 
 ### Changed
 
