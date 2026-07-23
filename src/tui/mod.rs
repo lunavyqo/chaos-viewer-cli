@@ -337,10 +337,37 @@ fn content_block<'a>(
 }
 
 fn key_line(theme: &Theme, hints: &[KeyHint], bg: Color) -> Line<'static> {
+    key_line_fit(theme, hints, bg, u16::MAX)
+}
+
+/// Build a key-hint line that stops before overflowing `max_w` columns.
+/// Remaining hints collapse to a short `…?` so important early keys stay visible.
+fn key_line_fit(theme: &Theme, hints: &[KeyHint], bg: Color, max_w: u16) -> Line<'static> {
+    let max = max_w as usize;
     let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    let ellipsis = "  …?";
+    let ellipsis_w = ellipsis.chars().count();
+
     for (i, h) in hints.iter().enumerate() {
+        let sep_w = if i > 0 { 2 } else { 0 };
+        let piece_w = sep_w + h.key.chars().count() + 1 + h.action.chars().count();
+        let more_after = i + 1 < hints.len();
+        let budget = if more_after {
+            max.saturating_sub(ellipsis_w)
+        } else {
+            max
+        };
+        if used + piece_w > budget && i > 0 {
+            spans.push(Span::styled(
+                ellipsis.to_string(),
+                paint_on(theme.muted, bg),
+            ));
+            break;
+        }
         if i > 0 {
             spans.push(Span::styled("  ", paint_on(theme.muted, bg)));
+            used += 2;
         }
         spans.push(Span::styled(
             h.key.to_string(),
@@ -350,6 +377,7 @@ fn key_line(theme: &Theme, hints: &[KeyHint], bg: Color) -> Line<'static> {
             format!(" {}", h.action),
             paint_on(theme.muted, bg),
         ));
+        used += h.key.chars().count() + 1 + h.action.chars().count();
     }
     Line::from(spans)
 }
@@ -740,27 +768,22 @@ impl App {
         if self.screen == Screen::Setup || self.searching {
             return Vec::new();
         }
+        // Keep this row short: one terminal line. Prefer high-traffic keys first;
+        // rarer ones live in `?` help. Batch clear keys stay near the front of
+        // the batch cluster so they do not fall off the right edge.
         match self.screen {
             Screen::Overview => vec![
                 KeyHint {
                     key: "j/k",
-                    action: "functions",
+                    action: "fn",
                 },
                 KeyHint {
                     key: "h/l",
-                    action: "modules",
+                    action: "mod",
                 },
                 KeyHint {
-                    key: "pgup/pgdn",
-                    action: "detail scroll",
-                },
-                KeyHint {
-                    key: "m",
-                    action: "match filter",
-                },
-                KeyHint {
-                    key: "s",
-                    action: "module sort",
+                    key: "m/s",
+                    action: "filter/sort",
                 },
                 KeyHint {
                     key: "/",
@@ -771,20 +794,16 @@ impl App {
                     action: "batch",
                 },
                 KeyHint {
-                    key: ",/.",
-                    action: "prev/next batch",
-                },
-                KeyHint {
-                    key: "+",
-                    action: "new empty batch",
+                    key: ",/.+",
+                    action: "slots",
                 },
                 KeyHint {
                     key: "S-b",
-                    action: "clear batch",
+                    action: "clear",
                 },
                 KeyHint {
                     key: "C-b",
-                    action: "clear all batches",
+                    action: "clear-all",
                 },
             ],
             Screen::Priorities => vec![
@@ -794,31 +813,27 @@ impl App {
                 },
                 KeyHint {
                     key: "n",
-                    action: "cycle list",
+                    action: "list",
                 },
                 KeyHint {
                     key: "enter",
-                    action: "show in overview",
+                    action: "overview",
                 },
                 KeyHint {
                     key: "b",
                     action: "batch",
                 },
                 KeyHint {
-                    key: ",/.",
-                    action: "prev/next batch",
-                },
-                KeyHint {
-                    key: "+",
-                    action: "new empty batch",
+                    key: ",/.+",
+                    action: "slots",
                 },
                 KeyHint {
                     key: "S-b",
-                    action: "clear batch",
+                    action: "clear",
                 },
                 KeyHint {
                     key: "C-b",
-                    action: "clear all batches",
+                    action: "clear-all",
                 },
             ],
             Screen::Prompt => vec![
@@ -828,97 +843,61 @@ impl App {
                 },
                 KeyHint {
                     key: "t",
-                    action: "next template",
-                },
-                KeyHint {
-                    key: "n",
-                    action: "new template",
-                },
-                KeyHint {
-                    key: "e",
-                    action: "edit template",
-                },
-                KeyHint {
-                    key: "S-t",
-                    action: "set default",
+                    action: "template",
                 },
                 KeyHint {
                     key: "m",
-                    action: "model picker",
+                    action: "model",
                 },
                 KeyHint {
-                    key: "y",
-                    action: "cycle reasoning",
-                },
-                KeyHint {
-                    key: "w",
-                    action: "cycle harness",
-                },
-                KeyHint {
-                    key: "d",
-                    action: "toggle near-miss drafts",
-                },
-                KeyHint {
-                    key: "h",
-                    action: "toggle Ghidra draft",
-                },
-                KeyHint {
-                    key: ",/.",
-                    action: "prev/next batch",
-                },
-                KeyHint {
-                    key: "+",
-                    action: "new empty batch",
+                    key: "d/h",
+                    action: "drafts",
                 },
                 KeyHint {
                     key: "c",
-                    action: "copy active",
+                    action: "copy",
                 },
                 KeyHint {
                     key: "g",
-                    action: "launch all batches",
+                    action: "launch",
                 },
                 KeyHint {
                     key: "S-g",
-                    action: "agent picker",
+                    action: "agents",
+                },
+                KeyHint {
+                    key: ",/.+",
+                    action: "slots",
                 },
                 KeyHint {
                     key: "S-b",
-                    action: "clear active batch",
+                    action: "clear",
                 },
                 KeyHint {
                     key: "C-b",
-                    action: "clear all batches",
+                    action: "clear-all",
                 },
             ],
             Screen::Claims => vec![
                 KeyHint {
-                    key: "r",
-                    action: "refresh",
-                },
-                KeyHint {
-                    key: "i",
-                    action: "sign in",
-                },
-                KeyHint {
-                    key: "o",
-                    action: "sign out",
+                    key: "i/o",
+                    action: "sign in/out",
                 },
                 KeyHint {
                     key: "L",
-                    action: "claim selected",
+                    action: "claim sel",
                 },
                 KeyHint {
                     key: "A",
-                    action: "claim all batches",
+                    action: "claim all",
                 },
                 KeyHint {
-                    key: "y",
-                    action: "renew mine",
+                    key: "y/x",
+                    action: "renew/release",
                 },
                 KeyHint {
-                    key: "x",
-                    action: "release mine",
+                    key: "r",
+                    action: "refresh",
                 },
             ],
             Screen::Tools => vec![
@@ -932,11 +911,11 @@ impl App {
                 },
                 KeyHint {
                     key: "n",
-                    action: "filter category",
+                    action: "filter",
                 },
                 KeyHint {
                     key: "r",
-                    action: "rescan local_repo",
+                    action: "rescan",
                 },
             ],
             Screen::Setup => Vec::new(),
@@ -4383,8 +4362,9 @@ chaos projects local-repo <id> /path/to/decomp \
                 .style(paint_on(self.theme.text, bg)),
             rows[0],
         );
+        let key_w = rows[1].width.max(1);
         f.render_widget(
-            Paragraph::new(key_line(&self.theme, &self.global_hints(), bg))
+            Paragraph::new(key_line_fit(&self.theme, &self.global_hints(), bg, key_w))
                 .style(paint_on(self.theme.text, bg)),
             rows[1],
         );
@@ -4399,8 +4379,9 @@ chaos projects local-repo <id> /path/to/decomp \
                 rows[2],
             );
         } else {
+            let ctx_w = rows[2].width.max(1);
             f.render_widget(
-                Paragraph::new(key_line(&self.theme, &ctx, bg))
+                Paragraph::new(key_line_fit(&self.theme, &ctx, bg, ctx_w))
                     .style(paint_on(self.theme.text, bg)),
                 rows[2],
             );
