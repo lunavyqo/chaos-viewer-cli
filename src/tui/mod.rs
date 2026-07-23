@@ -977,7 +977,7 @@ PROMPT
   j / k       scroll prompt text
   pgup/pgdn   scroll prompt by page
   t           next prompt template (builtins + ~/.config/chaos/templates)
-              builtins: chaos-viewer (default) · chaos-experimental (provenance)
+              builtins: chaos-viewer (match + provenance) · chaos-experimental (alias)
   n           new template (copy of chaos-viewer → editor)
   e           edit current user template in $EDITOR / nano
   Shift+t     set current template as default
@@ -985,7 +985,7 @@ PROMPT
   y           cycle reasoning / thinking level (high · medium · low · none)
   w           cycle harness preset (grok-build · cursor-agent · claude-code · …)
               model / reasoning / harness are saved in config.toml and prefilled
-              into experimental MATCH_RESULT so you do not retype them each try
+              into MATCH_RESULT so you do not retype them each try
   d           toggle stored near-miss / NONMATCHING drafts in prompt (off = disasm only)
   h           toggle Ghidra C draft in prompt (from local_repo/ghidra_out or details)
   , / .       previous / next batch (Prompt rebuilds for the active slot)
@@ -994,7 +994,7 @@ PROMPT
   g           launch default agent — one window per non-empty batch
   Shift+g     agent picker · enter launch all · d set default · esc close
   Shift+b     clear active batch
-  experimental projects auto-select chaos-experimental when on chaos-viewer
+  stock prompts always include provenance / attempt tree (experimental merged)
 
 CLAIMS (page 4 — live locks via project.claimsApi, e.g. https://tangos.dev/api/claims)
   r           refresh locks (API + CLAIMS.md)
@@ -1026,8 +1026,7 @@ SETUP / PROJECTS
   d           delete selected project (asks y/n first; list focused)
   p           open this hub from any loaded screen
   v           cycle data-tracking convention for selected project
-              default = current / sm64ds-compatible · experimental = fork for
-              future tracking experiments (same as default for now)
+              default = full tracking · experimental = alias of default
 
 Press ? or esc to close help."#
             .to_string()
@@ -1240,22 +1239,13 @@ Press ? or esc to close help."#
         Ok(())
     }
 
-    /// Prefer stock experimental prompt when on experimental convention (and vice versa).
+    /// Stock prompts are the same for default and experimental (merged).
+    /// Prefer the canonical `chaos-viewer` id when on either stock builtin.
     /// Does not override a user-selected custom template.
     fn sync_template_to_convention(&mut self) {
-        match self.convention {
-            Convention::Experimental => {
-                if self.prompt_template_id == BUILTIN_ID
-                    && self.template_store.get(BUILTIN_EXPERIMENTAL_ID).is_some()
-                {
-                    self.prompt_template_id = BUILTIN_EXPERIMENTAL_ID.to_string();
-                }
-            }
-            Convention::Default => {
-                if self.prompt_template_id == BUILTIN_EXPERIMENTAL_ID {
-                    self.prompt_template_id = BUILTIN_ID.to_string();
-                }
-            }
+        let _ = self.convention;
+        if self.prompt_template_id == BUILTIN_EXPERIMENTAL_ID {
+            self.prompt_template_id = BUILTIN_ID.to_string();
         }
     }
 

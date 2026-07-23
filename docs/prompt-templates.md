@@ -5,11 +5,10 @@ pick them in the TUI and set a default.
 
 | Built-in id | When to use |
 |-------------|-------------|
-| **`chaos-viewer`** | Default / sm64ds — matches [tangosdev/chaos-viewer](https://github.com/tangosdev/chaos-viewer) |
-| **`chaos-experimental`** | Experimental — match task + **`author`** (GitHub credit, prefilled from claims handle when set) + **`matchProvenance`** (how only: model / reasoning / harness, or human) |
+| **`chaos-viewer`** | **Default stock** — match task + **`author`** + **`matchProvenance`** + MATCH_RESULT attempt tree |
+| **`chaos-experimental`** | **Alias** of `chaos-viewer` (older configs may still select this id) |
 
-Loading an **experimental** project while the active template is still
-`chaos-viewer` auto-selects `chaos-experimental` (custom templates are left alone).
+Both built-ins render the same body. Custom user templates are never auto-switched.
 
 ## Where files live
 
@@ -49,11 +48,11 @@ On the **Prompt** page (`4`):
 | `d` | Toggle **stored near-miss drafts** (details `draft` and/or local `nearmiss/db.jsonl`) — off = ignore them |
 | `h` | Toggle **Ghidra C draft** (from `local_repo/ghidra_out` or detail draft) |
 
-### Provenance pickers (experimental MATCH_RESULT)
+### Provenance pickers (MATCH_RESULT)
 
 On the Prompt page, **model / reasoning / harness** are pickers so you do not retype
 them into every try. Selection is saved in `~/.config/chaos/config.toml` and
-prefilled into the `chaos-experimental` `MATCH_RESULT.matchProvenance` block.
+prefilled into the stock `MATCH_RESULT.matchProvenance` block.
 
 | Setting | Source | Keys |
 |---------|--------|------|
@@ -73,7 +72,7 @@ provenance_reasoning = "high"
 provenance_harness = "grok-build"
 ```
 
-`chaos prompt` also reads these values when rendering experimental templates.
+`chaos prompt` also reads these values when rendering stock templates.
 
 **Fresh matching (no existing C):** turn **drafts off** (`d`) and optionally Ghidra off
 (`h`), so the prompt is disasm + verify only.
@@ -215,7 +214,7 @@ Rendered as `header`, then each `function`, then `footer`, joined with blank lin
 | `{github_target}` | ` to {github}` or empty |
 | `{compiler}` `{setup}` `{rules}` `{read_first}` `{cpp_note}` `{near_miss_note}` | From atlas `project` block |
 | `{claims_api}` | Claims API base if any |
-| `{section_claims}` | Full claims agent block if session env is set; else empty |
+| `{section_claims}` | Mandatory CLAIMS.md + cleanup (+ API key lines when session set) |
 
 ### Placeholders — function body
 

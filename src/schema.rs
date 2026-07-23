@@ -72,16 +72,16 @@ pub struct ChaosFunction {
     pub floor: Option<String>,
     pub sim: Option<f64>,
     pub sibling: Option<String>,
-    /// **How** this function was matched (experimental convention; optional for default).
+    /// **How** this function was matched.
     ///
     /// Answers method only (`human` vs `ai` + model/reasoning/harness). Credit /
-    /// “who” stays on [`Self::author`]. Generators for experimental profiles should
-    /// set this on every matched function. Default / sm64ds atlases omit it.
+    /// “who” stays on [`Self::author`]. Atlases and agents should set this on
+    /// every matched function when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_provenance: Option<MatchProvenance>,
 }
 
-/// **How** a function was matched — required under the **experimental** convention.
+/// **How** a function was matched — required on matched functions (default tracking).
 ///
 /// “Who” is always [`ChaosFunction::author`], never this object.
 ///
@@ -148,7 +148,7 @@ impl MatchProvenance {
         }
     }
 
-    /// True when experimental **how** rules are satisfied.
+    /// True when **how** rules are satisfied (human, or AI with model+reasoning+harness).
     ///
     /// - **human**: complete (optional note only)
     /// - **ai**: non-empty `model`, `reasoning`, and `harness`

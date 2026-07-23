@@ -52,27 +52,27 @@ Per-project switch for how this CLI tracks / interprets atlas data:
 
 | Convention | Meaning |
 |---|---|
-| **default** | Current chaos-viewer / sm64ds-compatible behavior. Keep sm64ds (and other upstream-shaped repos) on this. |
-| **experimental** | Opt-in fork for alternate tracking. Divergences from default are listed below; future tracking experiments apply only here so default work stays stable. |
+| **default** | Full tracking: match provenance required on matches; stock prompt includes MATCH_RESULT / attempt tree. |
+| **experimental** | **Alias of default** (kept so older `projects.toml` values still load). |
 
 Missing `convention` keys in older `projects.toml` files load as **default**.
 
-### Experimental divergences (so far)
+### Stock tracking (formerly “experimental only”)
 
 1. **Match method + classic author**  
-   - **`author`** — who matched (GitHub login); same as default / chaos-viewer  
+   - **`author`** — who matched (GitHub login)  
    - **`matchProvenance`** — how: `human` or `ai` with **model / reasoning / harness**  
 
-   Experimental requires complete `matchProvenance` on matched functions; credit
-   still uses `author` only. Default profiles never require provenance.
+   Complete `matchProvenance` is expected on matched functions; credit still
+   uses `author` only.
 
 2. **Every attempt logged as a tree**  
-   Experimental work should append **every try** (including `no_progress` and
-   non-improving near-misses) to the decomp’s attempt log (e.g.
-   `config/match_attempts.jsonl` via `tools/log_attempt.py`). Best tip **C**
-   belongs in `nearmiss/db.jsonl` (pass `--src` on near_miss logs). The
-   `chaos-experimental` prompt requires a **MATCH_RESULT node** per function
-   per try, with **stable ids + tree links** so history is not a flat diary:
+   Work should append **every try** (including `no_progress` and non-improving
+   near-misses) to the decomp’s attempt log (e.g. `config/match_attempts.jsonl`
+   via `tools/log_attempt.py`). Best tip **C** belongs in `nearmiss/db.jsonl`
+   (pass `--src` on near_miss logs). The stock `chaos-viewer` prompt requires a
+   **MATCH_RESULT node** per function per try, with **stable ids + tree links**
+   so history is not a flat diary:
 
    | Field | Role |
    |---|---|
@@ -104,12 +104,11 @@ Missing `convention` keys in older `projects.toml` files load as **default**.
    Full history stays out of `chaos-db.json` (size); the atlas keeps lean credit
    + final how. The jsonl is where the tree lives.
 
-3. **Stock prompt `chaos-experimental`**  
+3. **Stock prompt `chaos-viewer`** (and alias `chaos-experimental`)  
    Emits `MATCH_RESULT` with tree ids, `author` (credit) + `matchProvenance`
-   (method) + attempt status/scores. Auto-selected when loading an experimental
-   profile. Model / reasoning / harness are chosen once in the TUI (`m` model
-   picker · `y` / `w` for reasoning / harness) and prefilled into each
-   `MATCH_RESULT` so operators do not retype them every try.
+   (method) + attempt status/scores. Model / reasoning / harness are chosen once
+   in the TUI (`m` model picker · `y` / `w` for reasoning / harness) and
+   prefilled into each `MATCH_RESULT` so operators do not retype them every try.
 
 ## CLI
 

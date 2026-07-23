@@ -198,11 +198,11 @@ pub fn batch_max() -> usize {
     BATCH_MAX
 }
 
-/// Build a full prompt the same way the web viewer does:
-/// `[header, ...sections, footer].join("\n\n")`.
+/// Build the stock match prompt (match task + attempt tree + provenance).
 ///
 /// Prefer [`crate::templates::TemplateStore::render`] when a user template id
-/// is selected; this is the built-in `chaos-viewer` body.
+/// is selected. This is the built-in `chaos-viewer` / `chaos-experimental` body
+/// (experimental was merged into default).
 pub fn build_prompt(
     project: &ProjectConfig,
     functions: &[(ChaosFunction, Option<FunctionDetail>)],
@@ -211,33 +211,9 @@ pub fn build_prompt(
     build_builtin_prompt(project, functions, opts)
 }
 
-/// Built-in chaos-viewer prompt (exact web parity).
+/// Stock built-in prompt: retail match task **plus** MATCH_RESULT / attempt tree /
+/// matchProvenance (formerly `chaos-experimental` only).
 pub fn build_builtin_prompt(
-    project: &ProjectConfig,
-    functions: &[(ChaosFunction, Option<FunctionDetail>)],
-    opts: &PromptOptions,
-) -> String {
-    // Web uses batch.length / 1; empty selection is handled by the caller.
-    let n = if functions.is_empty() {
-        1
-    } else {
-        functions.len()
-    };
-    let mut parts: Vec<String> = Vec::new();
-    parts.push(prompt_header(project, n, opts));
-    for (fn_, det) in functions {
-        parts.push(prompt_section(project, fn_, det.as_ref(), opts));
-    }
-    parts.push(prompt_footer(project, n, opts));
-    parts.join("\n\n")
-}
-
-/// Built-in **experimental** prompt: chaos-viewer match task + mandatory
-/// match-provenance reporting (model, reasoning level, harness — or human).
-///
-/// For projects on the experimental convention. Does not change the default
-/// `chaos-viewer` template (sm64ds / upstream parity).
-pub fn build_experimental_prompt(
     project: &ProjectConfig,
     functions: &[(ChaosFunction, Option<FunctionDetail>)],
     opts: &PromptOptions,
@@ -255,7 +231,7 @@ pub fn build_experimental_prompt(
     } else {
         ("batch", n)
     };
-    parts.push(prompt_header_experimental(
+    parts.push(prompt_header_with_provenance(
         project,
         n,
         &author,
@@ -274,7 +250,7 @@ pub fn build_experimental_prompt(
             opts,
         ));
     }
-    parts.push(prompt_footer_experimental(
+    parts.push(prompt_footer_with_provenance(
         project,
         n,
         opts,
@@ -283,6 +259,15 @@ pub fn build_experimental_prompt(
         batch_size,
     ));
     parts.join("\n\n")
+}
+
+/// Alias kept for callers/templates that still name the old experimental stock.
+pub fn build_experimental_prompt(
+    project: &ProjectConfig,
+    functions: &[(ChaosFunction, Option<FunctionDetail>)],
+    opts: &PromptOptions,
+) -> String {
+    build_builtin_prompt(project, functions, opts)
 }
 
 /// Operator GitHub login for the classic **`author`** credit field.
@@ -307,7 +292,7 @@ fn operator_github_handle(opts: &PromptOptions) -> String {
     "YOUR_GITHUB_LOGIN".into()
 }
 
-fn prompt_header_experimental(
+fn prompt_header_with_provenance(
     project: &ProjectConfig,
     n: usize,
     author: &str,
@@ -343,7 +328,7 @@ Same field as contributor colors."
         r#"
 
 ======================================================================
-EXPERIMENTAL — WHO vs HOW vs ATTEMPT TREE
+WHO vs HOW vs ATTEMPT TREE
 ======================================================================
 WHO (credit, contributor colors) → function field `author` (GitHub login)
 HOW  (final method when banked)  → `matchProvenance` only
@@ -569,7 +554,7 @@ Example after a few tries (sketch only — emit the YAML node, not this art):
     )
 }
 
-fn prompt_footer_experimental(
+fn prompt_footer_with_provenance(
     project: &ProjectConfig,
     n: usize,
     opts: &PromptOptions,
@@ -592,7 +577,7 @@ fn prompt_footer_experimental(
         r#"
 
 ======================================================================
-EXPERIMENTAL — BEFORE YOU FINISH
+BEFORE YOU FINISH
 ======================================================================
 1. For EACH function, emit a filled MATCH_RESULT **node** for this try.
 2. Identity (required): schemaVersion=1, functionId (atlas id), unique attemptId
@@ -631,10 +616,19 @@ EXPERIMENTAL — BEFORE YOU FINISH
     log_attempt for the session. If bank is only fan-out JSON verify, use
     stamp_provenance when present.
 11. Open a PR when matched; PR author should match `author`.
+12. Claims + cleanup (same as default footer — still required here):
+    - You must have claimed via CLAIMS.md and/or the live API before work.
+    - On byte-identical MATCH: do NOT unclaim/release that function — set
+      CLAIMS.md status to **done** (keep credit). Only release/unclaim work you
+      did **not** match.
+    - On exit without MATCH: release API locks / mark CLAIMS.md released.
+    - Tree-kill any permuter / grind processes you started. Do not leave workers.
 
 Refuse to claim "matched" without verify succeeding.
 Never skip logging a failed/empty try — it is a leaf on the tree.
 Never reuse attemptId. Never key history by function name alone — use functionId.
+Never skip CLAIMS.md / permuter shutdown because the try failed.
+Never unclaim a function you matched byte-identical.
 "#,
         author_rule = author_rule,
         session_scope = session_scope,
@@ -744,12 +738,10 @@ files — even if present."
         );
     }
     lines.push(String::new());
-    // Keep this shared block free of experimental MATCH_RESULT / provenance
-    // jargon — default (chaos-viewer / sm64ds) must not mention those fields.
-    // Experimental templates restate draft trackers in their own header/footer.
     lines.push(
         "If both OFF: fresh try from TARGET DISASSEMBLY only. \
-Respect the USE / MUST NOT rules above for every attempt."
+Respect the USE / MUST NOT rules above for every attempt. \
+MATCH_RESULT usedNearMissDraft / usedGhidraDraft must match what you actually used."
             .into(),
     );
     lines.join("\n")
@@ -913,41 +905,20 @@ GHIDRA SCAFFOLD files for this function even if present on disk."
     lines.join("\n")
 }
 
-/// Port of `promptFooter(n)` from chaos-viewer App.tsx.
+/// Port of `promptFooter(n)` from chaos-viewer App.tsx, plus mandatory claims /
+/// cleanup rules models often skip when only mentioned softly in READ FIRST.
 fn prompt_footer(project: &ProjectConfig, n: usize, opts: &PromptOptions) -> String {
     // Web starts with an empty line entry.
     let mut lines = vec![String::new()];
     if let Some(rules) = &project.rules {
         lines.push(format!("Rules: {rules}"));
     }
-    if let (Some(api), Some(session)) =
-        (project.claims_api.as_deref(), opts.claims_session.as_ref())
-    {
-        let handle = if session.handle.is_empty() {
-            "chaos-viewer-user"
-        } else {
-            session.handle.as_str()
-        };
-        let each = if n > 1 {
-            "EACH function"
-        } else {
-            "the function"
-        };
-        lines.push(String::new());
-        lines.push(format!(
-            "CLAIMS (coordination lock; do this BEFORE writing code): my claims api key is {} - send it as the X-Api-Key header on every claims call.",
-            session.token
-        ));
-        lines.push(format!(
-            "For {each} above: POST {api}/try-lock with JSON {{\"module\": \"<module>\", \"start\": \"0x<addr>\", \"end\": \"0x<addr+size>\", \"handle\": \"{handle}\"}}."
-        ));
-        lines.push(format!(
-            "Save the returned claim.id; renew while working (POST {api}/{{id}}/renew with {{\"handle\": \"{handle}\"}}) and release when done (POST {api}/{{id}}/release, same body)."
-        ));
-        lines.push(format!(
-            "If try-lock returns a conflict, someone else has it - skip that function. If calls return 401 the short-lived key expired - continue without locking and tell me to re-sign-in. Full contract: GET {api}/instructions."
-        ));
-    }
+    lines.push(String::new());
+    lines.extend(claims_and_cleanup_block(
+        project,
+        n,
+        opts.claims_session.as_ref(),
+    ));
     let target = if project.github.is_empty() {
         String::new()
     } else {
@@ -976,6 +947,152 @@ fn prompt_footer(project: &ProjectConfig, n: usize, opts: &PromptOptions) -> Str
         }
     }
     lines.join("\n")
+}
+
+/// Mandatory CLAIMS.md + optional live API + permuter shutdown.
+///
+/// Always emitted on the default (and experimental) footers so agents cannot
+/// treat claims as optional flavor text. API key lines only appear when a
+/// session is configured.
+pub(crate) fn claims_and_cleanup_block(
+    project: &ProjectConfig,
+    n: usize,
+    session: Option<&ClaimsSession>,
+) -> Vec<String> {
+    let each = if n > 1 {
+        "EACH function above"
+    } else {
+        "the function above"
+    };
+    let handle = session
+        .map(|s| s.handle.as_str())
+        .filter(|h| !h.is_empty())
+        .unwrap_or("YOUR_HANDLE");
+
+    let mut lines = vec![
+        "======================================================================".into(),
+        "REQUIRED — CLAIMS (do this BEFORE writing code; do not skip)".into(),
+        "======================================================================".into(),
+        "Human and agent workers coordinate via CLAIMS.md at the decomp repo root.".into(),
+        "Ignoring claims wastes parallel effort. Treat this as a hard gate.".into(),
+        String::new(),
+        "BEFORE matching / editing:".into(),
+        "  1. Open and read CLAIMS.md (repo root). Note active rows.".into(),
+        format!(
+            "  2. For {each}: if someone else already has an active claim on that \
+module/addr range, SKIP it (do not match over their claim)."
+        ),
+        format!("  3. Claim your work under handle \"{handle}\" BEFORE the first edit:"),
+        "     a) Prefer the live claims API when a key is provided below (try-lock).".into(),
+        "     b) Always keep CLAIMS.md honest: add/update a table row for your \
+range/function(s) — Range, Who, date, status=active — even if the API also holds a lock."
+            .into(),
+        "     c) If tools/claims.py exists and you have CLAIMS_API_KEY / claims_key.txt, \
+you may use: python tools/claims.py lock --module … --start 0x… --end 0x…"
+            .into(),
+        "  4. Do not start matching until the claim is recorded (API and/or CLAIMS.md).".into(),
+        String::new(),
+        "WHILE working:".into(),
+        "  - Renew API locks if you hold claim ids (TTL is finite).".into(),
+        "  - Do not expand into unclaimed ranges without claiming them first.".into(),
+        String::new(),
+        "WHEN FINISHED (match, near-miss park, give-up, or session end) — MANDATORY:".into(),
+        "  1. CLAIMS after a BYTE-IDENTICAL MATCH (verify reports MATCH):".into(),
+        "     - Do NOT unclaim / release / drop the claim for that function.".into(),
+        "     - Keep credit: set CLAIMS.md status to **done** (or equivalent), \
+with a short note that it matched — never status=released and never delete \
+the row as if you abandoned the work."
+            .into(),
+        "     - If the live API still holds a lock on a fully matched range, \
+prefer leaving credit intact (done) over release; do **not** unclaim a match."
+            .into(),
+        "  2. CLAIMS after give-up / no match / session end without MATCH:".into(),
+        "     - Release every API lock you took (POST …/release or tools/claims.py release)."
+            .into(),
+        "     - Update CLAIMS.md: status=released (or remove the row). \
+Do not leave stale active rows on abandoned work."
+            .into(),
+        "  3. Stop every decomp-permuter process you started (see below).".into(),
+    ];
+
+    if let (Some(api), Some(session)) = (project.claims_api.as_deref(), session) {
+        let api = api.trim().trim_end_matches('/');
+        lines.push(String::new());
+        lines.push(format!(
+            "CLAIMS API KEY (send as X-Api-Key on every write): {}",
+            session.token
+        ));
+        lines.push(format!("API base: {api}"));
+        lines.push(format!(
+            "For {each}: POST {api}/try-lock with JSON \
+{{\"module\": \"<module>\", \"start\": \"0x<addr>\", \"end\": \"0x<addr+size>\", \
+\"handle\": \"{handle}\", \"note\": \"optional\"}}."
+        ));
+        lines.push(format!(
+            "Save claim.id; renew: POST {api}/{{id}}/renew {{\"handle\":\"{handle}\"}} · \
+release: POST {api}/{{id}}/release same body."
+        ));
+        lines.push(
+            "Conflict → skip that function. 401 → key expired; fall back to CLAIMS.md only \
+and tell the operator to re-sign-in. Full contract: GET {api}/instructions."
+                .replace("{api}", api),
+        );
+        lines.push("API lock does NOT replace CLAIMS.md — still update the markdown table.".into());
+    } else if project
+        .claims_api
+        .as_ref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        lines.push(String::new());
+        lines.push(format!(
+            "Live claims API is configured ({}) but no session key is in this prompt — \
+use CLAIMS.md (and tools/claims.py if the operator set CLAIMS_API_KEY).",
+            project.claims_api.as_deref().unwrap_or("")
+        ));
+    } else {
+        lines.push(String::new());
+        lines.push(
+            "No live claimsApi in project config — CLAIMS.md is the coordination surface. \
+Do not invent an API host."
+                .into(),
+        );
+    }
+
+    lines.push(String::new());
+    lines.push("======================================================================".into());
+    lines.push("REQUIRED — PERMUTER / BACKGROUND JOB CLEANUP".into());
+    lines.push("======================================================================".into());
+    lines.push(
+        "If you run tools/permuter (permuter.py, crunch.py, batch.py, import_func, etc.):".into(),
+    );
+    lines.push(
+        "  - The permuter spawns worker PROCESSES (-j). Killing only the parent or \
+exiting the chat leaves them running and they burn CPU/RAM."
+            .into(),
+    );
+    lines.push(
+        "  - When the job ends (match, timeout, give-up, or you stop the session), \
+STOP THE WHOLE PROCESS TREE before you finish:"
+            .into(),
+    );
+    lines.push(
+        "      Unix/macOS: kill the process group (e.g. kill -- -PGID) or \
+pkill -P <parent_pid> then kill <parent_pid>; confirm with pgrep/ps that no \
+permuter.py / mwccarm worker remains."
+            .into(),
+    );
+    lines.push("      Windows: taskkill /F /T /PID <pid> (tree kill).".into());
+    lines.push(
+        "  - Prefer a hard time budget + tree-kill on timeout (same pattern as \
+tools/permuter/crunch.py). Never leave permuters running after the task ends."
+            .into(),
+    );
+    lines.push(
+        "  - Same rule for any other long-running grind you started (crack loops, \
+overnight sweeps): shut them down on exit."
+            .into(),
+    );
+    lines
 }
 
 #[cfg(test)]
@@ -1214,29 +1331,64 @@ mod tests {
     }
 
     #[test]
-    fn default_builtin_prompt_has_no_experimental_match_result_jargon() {
-        // Regression: draft policy / shared header must not leak MATCH_RESULT
-        // trackers into the default chaos-viewer (sm64ds) template.
+    fn default_builtin_prompt_includes_provenance_and_attempt_tree() {
+        // Experimental tracking is now the stock default body.
         let project = sample_project();
         let fn_ = sample_fn();
         let text = build_builtin_prompt(&project, &[(fn_, None)], &PromptOptions::default());
-        for banned in [
-            "MATCH_RESULT",
-            "matchProvenance",
-            "usedNearMissDraft",
-            "usedGhidraDraft",
-            "sessionScope",
-            "log_attempt",
-            "stamp_provenance",
-            "EXPERIMENTAL —",
-        ] {
-            assert!(
-                !text.contains(banned),
-                "default prompt must not contain experimental jargon {banned:?}"
-            );
-        }
+        assert!(text.contains("MATCH_RESULT"));
+        assert!(text.contains("matchProvenance"));
+        assert!(text.contains("usedNearMissDraft"));
+        assert!(text.contains("usedGhidraDraft"));
+        assert!(text.contains("sessionScope"));
+        assert!(text.contains("log_attempt"));
+        assert!(text.contains("stamp_provenance"));
+        assert!(text.contains("WHO vs HOW vs ATTEMPT TREE"));
         assert!(text.contains("DRAFT POLICY"));
-        assert!(text.contains("Respect the USE / MUST NOT rules"));
+        assert!(!text.contains("EXPERIMENTAL —"));
+    }
+
+    #[test]
+    fn default_prompt_requires_claims_md_and_permuter_shutdown() {
+        // Always present even without a claims session (models skip soft hints).
+        let project = sample_project();
+        let fn_ = sample_fn();
+        let text = build_builtin_prompt(&project, &[(fn_, None)], &PromptOptions::default());
+        assert!(text.contains("REQUIRED — CLAIMS"));
+        assert!(text.contains("CLAIMS.md"));
+        assert!(text.contains("BEFORE matching"));
+        assert!(text.contains("Do NOT unclaim") || text.contains("do NOT unclaim"));
+        assert!(text.contains("BYTE-IDENTICAL MATCH"));
+        assert!(text.contains("REQUIRED — PERMUTER"));
+        assert!(
+            text.contains("PROCESS TREE")
+                || text.contains("process tree")
+                || text.contains("process group")
+        );
+        assert!(text.contains("taskkill") || text.contains("pkill"));
+        // Without session, must not invent a fake API key line.
+        assert!(!text.contains("CLAIMS API KEY"));
+    }
+
+    #[test]
+    fn default_prompt_includes_api_when_session_present() {
+        let mut project = sample_project();
+        project.claims_api = Some("https://tangos.dev/api/claims".into());
+        let fn_ = sample_fn();
+        let opts = PromptOptions {
+            claims_session: Some(ClaimsSession {
+                token: "test-key".into(),
+                handle: "tester".into(),
+            }),
+            ..Default::default()
+        };
+        let text = build_builtin_prompt(&project, &[(fn_, None)], &opts);
+        assert!(text.contains("CLAIMS.md"));
+        assert!(text.contains("CLAIMS API KEY"));
+        assert!(text.contains("test-key"));
+        assert!(text.contains("try-lock"));
+        assert!(text.contains("API lock does NOT replace CLAIMS.md"));
+        assert!(text.contains("REQUIRED — PERMUTER"));
     }
 
     #[test]
@@ -1254,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn matches_web_header_section_footer_shape() {
+    fn stock_prompt_keeps_match_task_shape_plus_provenance() {
         let project = sample_project();
         let fn_ = sample_fn();
         let det = FunctionDetail {
@@ -1268,38 +1420,21 @@ mod tests {
         };
         let text = build_prompt(&project, &[(fn_, Some(det))], &PromptOptions::default());
 
-        // Header
-        assert!(text.starts_with(
-            "Match one demo function to the retail binary, byte-for-byte.\n\nSETUP (once): clone https://github.com/you/demo\n\nCOMPILER: mwccarm -O4,p\n\nREAD FIRST: README.md"
-        ));
-        // Section separators / address style (no 0-pad beyond toString(16))
+        // Match-task core
+        assert!(text.contains("Match one demo function to the retail binary, byte-for-byte."));
         assert!(text.contains(
             "FUNCTION: func_020009e0   module: arm9   addr: 0x20009e0   size: 120 bytes"
         ));
-        assert!(text.contains(
-            "VERIFY every attempt (relocation-aware byte compare):\n  python tools/match.py --func func_020009e0 --addr 0x20009e0 --size 0x78"
-        ));
-        assert!(text.contains(
-            "CLOSEST MATCHED SIBLING (opcode similarity 0.87): src/func_scaffold.c[pp] - use it as your scaffold."
-        ));
         assert!(text.contains("NEAR-MISS DRAFT — INCLUDED BELOW"));
-        assert!(text.contains("USE IT as the starting C (2 instruction(s) from matching)"));
-        assert!(text.contains("```c\nint f(void) { return 0; }\n```"));
         assert!(text.contains("DRAFT POLICY"));
-        assert!(text.contains("TARGET DISASSEMBLY (annotated, callees resolved):\n```\n  020009e0:  ldr      r0, [pc, #0x6c]\n  020009e4:  ldr      r1, [r0]\n```"));
-        // Footer
+        assert!(text.contains("TARGET DISASSEMBLY (annotated, callees resolved):"));
         assert!(text.contains("Rules: no ROM"));
-        assert!(text.contains(
-            "Matched means byte-identical - iterate until the verify command reports a MATCH."
-        ));
-        assert!(text.contains(
-            "When it matches, fork the repo and open a pull request to https://github.com/you/demo against its default branch\n(one function or a small related family per PR; note the compiler version and the function address)."
-        ));
-        assert!(text.contains("save drafts"));
-        // Join style: header / section / footer separated by blank lines
-        assert!(text.contains(
-            "\n\n======================================================================\n"
-        ));
+        assert!(text.contains("Matched means byte-identical"));
+        // Provenance / attempt tree (now stock default)
+        assert!(text.contains("MATCH_RESULT"));
+        assert!(text.contains("matchProvenance"));
+        assert!(text.contains("WHO vs HOW vs ATTEMPT TREE"));
+        assert!(text.contains("BEFORE YOU FINISH"));
     }
 
     #[test]

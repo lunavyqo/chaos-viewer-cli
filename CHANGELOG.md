@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Experimental tracking is now default** — stock `chaos-viewer` prompt includes
+  MATCH_RESULT / attempt tree / `matchProvenance` (formerly only
+  `chaos-experimental`). Matched functions expect complete provenance under
+  both conventions. `experimental` in `projects.toml` and the
+  `chaos-experimental` template id remain as **aliases** of default.
+
+- **Default prompts: mandatory CLAIMS.md + permuter cleanup** — stock
+  `chaos-viewer` (and shared template claims block) now hard-require reading /
+  updating **CLAIMS.md**, claiming before edits, and **tree-killing permuter
+  workers** on session end. After a **byte-identical MATCH**, do **not**
+  unclaim/release that function — mark CLAIMS.md **done** (keep credit); only
+  release abandoned work. Live API try-lock remains when a session key is
+  present, but no longer replaces CLAIMS.md.
+
 ### Added
 
 - **TUI claims write path** — claim / renew / release against
@@ -51,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Prompt builder: skip stored drafts** — force matching without existing
   near-miss / NONMATCHING C. TUI Prompt: **`d`** toggles; CLI: `--no-drafts`.
   (Ghidra remains controlled separately via **`h`** / `--no-ghidra`.)
-- **Experimental MATCH_RESULT draft trackers** — required independent booleans
+- **MATCH_RESULT draft trackers** — required independent booleans
   `usedNearMissDraft` and `usedGhidraDraft` (pre-filled from what the prompt
   included). **Inherit** from `parentAttemptId`: if an ancestor used Ghidra
   (or a near-miss draft), descendants keep that flag true. `base.kind` may be
@@ -59,9 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Prompt provenance pickers** — on the Prompt page, **`m`** opens a **model
   picker** (fixed list, agent-picker style); **`y`** / **`w`** cycle reasoning
   and harness. Selection is stored in `config.toml` and prefilled into
-  experimental `MATCH_RESULT.matchProvenance` (no retyping each try).
-
-### Changed
+  `MATCH_RESULT.matchProvenance` (no retyping each try).
 
 - **TUI header progress** now shows both function and byte match meters
   (`matched/total fn (%)` and `matched/total B (%)`), matching `chaos stats`.

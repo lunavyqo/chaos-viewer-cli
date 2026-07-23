@@ -34,7 +34,7 @@ Unpack and put `chaos` (or `chaos.exe`) on your `PATH`.
 
 - Load atlas data from a local path, raw JSON URL, or GitHub repo (probes the same
   locations as the web viewer); **multiple saved projects** with switch / resume
-  and per-project **conventions** (`default` vs `experimental` tracking)
+  and per-project **conventions** (`default` full tracking; `experimental` is an alias)
 - Overview: modules + functions on top, **detail pane** underneath; **`m`**
   filters all / unmatched only / matched only; **`s`** sorts modules (name,
   worst/best by unmatched left, most functions, most bytes)
@@ -47,8 +47,9 @@ Unpack and put `chaos` (or `chaos.exe`) on your `PATH`.
   **`g`** / **`Shift+g`** to launch **Grok / Codex / Claude / Antigravity** —
   one separate terminal window per non-empty batch (set `local_repo` per
   project; default agent configurable), and **`Shift+b`** clear active batch;
-  **multiple templates** (built-in `chaos-viewer` + experimental provenance
-  prompt + user TOML under `~/.config/chaos/templates`)
+  **multiple templates** (built-in `chaos-viewer` = match + provenance /
+  attempt tree; `chaos-experimental` is an alias; user TOML under
+  `~/.config/chaos/templates`)
 - Optional **pluggable claims** coordination: any HTTP coordinator via
   `project.claimsApi` (sm64ds uses tangos.dev) + `CLAIMS.md` merge; TUI can
   **sign in / try-lock / renew / release** like the web viewer (`L` selected,
@@ -93,7 +94,7 @@ chaos templates default short
 Prompt templates: [`docs/prompt-templates.md`](docs/prompt-templates.md). In the
 TUI Prompt page: **`t`** cycles, **`n`** new template, **`e`** edit current
 user template (`$EDITOR`/`nano`), **`Shift+t`** sets the default. For
-experimental provenance, **`m`** opens the model picker; **`y`** / **`w`**
+match provenance, **`m`** opens the model picker; **`y`** / **`w`**
 cycle reasoning · harness (prefilled into `MATCH_RESULT`).
 
 ### Claims (optional, pluggable)

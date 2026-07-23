@@ -1,9 +1,9 @@
 //! Per-project data-tracking conventions.
 //!
-//! Profiles pick a convention in the Projects hub. **Default** is the current
-//! chaos-viewer / sm64ds-compatible behavior. **Experimental** is a fork for
-//! alternate tracking (match provenance, and future changes). Default profiles
-//! never require experimental fields.
+//! Profiles pick a convention in the Projects hub. **Default** is the full
+//! tracking path (match provenance + attempt tree in stock prompts).
+//! **Experimental** remains a synonym for Default (kept for older
+//! `projects.toml` values).
 
 use serde::{Deserialize, Serialize};
 
@@ -13,11 +13,11 @@ use crate::schema::{ChaosFunction, MatchProvenance};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Convention {
-    /// Current upstream-compatible tracking (sm64ds and friends).
+    /// Full tracking: provenance on matches + attempt-tree prompts.
     #[default]
     Default,
-    /// Opt-in fork for experimental tracking. Diverges from Default only where
-    /// documented (e.g. required match provenance on matched functions).
+    /// Historical alias of [`Self::Default`] (older profiles may still say
+    /// `experimental` in `projects.toml`).
     Experimental,
 }
 
@@ -89,9 +89,6 @@ impl Tracking {
     }
 
     /// Match provenance for a function under this convention.
-    ///
-    /// - **Default**: returns atlas field if present (no requirement).
-    /// - **Experimental**: same field; use [`Self::provenance_status`] to check completeness.
     pub fn match_provenance(
         _convention: Convention,
         f: &ChaosFunction,
@@ -99,10 +96,11 @@ impl Tracking {
         f.match_provenance.as_ref()
     }
 
-    /// Experimental rule: every **matched** function must record how it was matched
-    /// (human, or AI with model + reasoning level + harness).
-    pub fn requires_match_provenance(convention: Convention) -> bool {
-        matches!(convention, Convention::Experimental)
+    /// Every **matched** function should record how it was matched (human, or AI
+    /// with model + reasoning level + harness). Applies to Default and the
+    /// Experimental alias alike.
+    pub fn requires_match_provenance(_convention: Convention) -> bool {
+        true
     }
 
     /// Status of provenance for display / validation.
@@ -110,20 +108,15 @@ impl Tracking {
         if !f.matched {
             return ProvenanceStatus::NotMatched;
         }
-        match convention {
-            Convention::Default => match f.match_provenance.as_ref() {
-                Some(p) => ProvenanceStatus::Present(p),
-                None => ProvenanceStatus::OptionalMissing,
-            },
-            Convention::Experimental => match f.match_provenance.as_ref() {
-                None => ProvenanceStatus::RequiredMissing,
-                Some(p) if p.is_complete() => ProvenanceStatus::Present(p),
-                Some(p) => ProvenanceStatus::Incomplete(p),
-            },
+        let _ = convention;
+        match f.match_provenance.as_ref() {
+            None => ProvenanceStatus::RequiredMissing,
+            Some(p) if p.is_complete() => ProvenanceStatus::Present(p),
+            Some(p) => ProvenanceStatus::Incomplete(p),
         }
     }
 
-    /// Lines for the detail pane (empty under default when nothing recorded).
+    /// Lines for the detail pane.
     pub fn provenance_detail_lines(convention: Convention, f: &ChaosFunction) -> Vec<String> {
         match Self::provenance_status(convention, f) {
             ProvenanceStatus::NotMatched => Vec::new(),
@@ -132,7 +125,7 @@ impl Tracking {
                 vec![format!("matched via: {}", p.summary())]
             }
             ProvenanceStatus::RequiredMissing => {
-                vec!["matched via: ⚠ MISSING (experimental requires human or AI provenance)".into()]
+                vec!["matched via: ⚠ MISSING (requires human or AI provenance)".into()]
             }
             ProvenanceStatus::Incomplete(p) => {
                 vec![format!(
@@ -148,9 +141,9 @@ impl Tracking {
 #[derive(Debug, Clone, Copy)]
 pub enum ProvenanceStatus<'a> {
     NotMatched,
-    /// Default atlas without the field — fine.
+    /// Reserved (historically: default without required provenance).
     OptionalMissing,
-    /// Experimental matched function without provenance — not fine.
+    /// Matched function without provenance — not fine.
     RequiredMissing,
     Present(&'a MatchProvenance),
     /// Present but AI record lacks model / reasoning / harness.
@@ -209,7 +202,7 @@ mod tests {
         ));
         assert!(matches!(
             Tracking::provenance_status(Convention::Default, &bare),
-            ProvenanceStatus::OptionalMissing
+            ProvenanceStatus::RequiredMissing
         ));
 
         let human = sample_fn(
