@@ -19,7 +19,7 @@ pub use conventions::{Convention, Tracking};
 
 pub use claims::{
     merge_locked_map, normalize_claims_api_base, parse_claims_md, Claim, ClaimsClient,
-    ClaimsSession,
+    ClaimsSession, MyClaimRecord,
 };
 pub use discover::{discover_chaos_db, discover_data_url};
 pub use http::build_client;

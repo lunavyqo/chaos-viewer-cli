@@ -20,7 +20,10 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use reqwest::Client;
 
-use crate::claims::{load_claims, merge_locked_map, ClaimsSession};
+use crate::claims::{
+    clear_saved_auth, load_claims, load_my_claims, load_saved_auth, merge_locked_map,
+    open_in_browser, save_auth, session_from_gh_cli, ClaimsClient, ClaimsSession, MyClaimRecord,
+};
 use crate::clipboard::copy_text;
 use crate::conventions::Convention;
 use crate::discover::sources_equivalent;
@@ -440,6 +443,11 @@ struct App {
     /// After leaving the TUI briefly, open this path in $EDITOR / nano.
     pending_edit: Option<std::path::PathBuf>,
     claims_session: Option<ClaimsSession>,
+    /// Locks we acquired (renew / release), persisted with the session.
+    my_claims: Vec<MyClaimRecord>,
+    /// Claims page: paste API key / session token after `i` fails auto sign-in.
+    claims_paste_open: bool,
+    claims_paste_buf: String,
     show_help: bool,
     /// Centered agent picker (Prompt · Shift+g).
     agent_picker_open: bool,
@@ -536,6 +544,9 @@ impl App {
             template_name_input: String::new(),
             pending_edit: None,
             claims_session,
+            my_claims: load_my_claims(),
+            claims_paste_open: false,
+            claims_paste_buf: String::new(),
             show_help: false,
             agent_picker_open: false,
             agent_picker_sel: 0,
@@ -868,10 +879,36 @@ impl App {
                     action: "clear active batch",
                 },
             ],
-            Screen::Claims => vec![KeyHint {
-                key: "r",
-                action: "refresh claims",
-            }],
+            Screen::Claims => vec![
+                KeyHint {
+                    key: "r",
+                    action: "refresh",
+                },
+                KeyHint {
+                    key: "i",
+                    action: "sign in",
+                },
+                KeyHint {
+                    key: "o",
+                    action: "sign out",
+                },
+                KeyHint {
+                    key: "L",
+                    action: "claim selected",
+                },
+                KeyHint {
+                    key: "A",
+                    action: "claim all batches",
+                },
+                KeyHint {
+                    key: "y",
+                    action: "renew mine",
+                },
+                KeyHint {
+                    key: "x",
+                    action: "release mine",
+                },
+            ],
             Screen::Tools => vec![
                 KeyHint {
                     key: "j/k",
@@ -905,6 +942,8 @@ GLOBAL
   p           projects hub (switch / add / remove saved repos)
   u           update progress (re-fetch chaos-db; matches can land mid-session)
   r           refresh claims only
+  L           claim selected function on project.claimsApi (e.g. tangos.dev)
+  A           claim every function in ALL mass-batcher slots (not only active)
   c           copy active-batch prompt to clipboard (no-op if active empty)
   g           launch default agent for ALL non-empty batches (Prompt)
               · each batch opens a separate terminal window · Shift+g agent picker
@@ -956,6 +995,17 @@ PROMPT
   Shift+g     agent picker · enter launch all · d set default · esc close
   Shift+b     clear active batch
   stock prompts always include provenance / attempt tree (experimental merged)
+
+CLAIMS (page 4 — live locks via project.claimsApi, e.g. https://tangos.dev/api/claims)
+  r           refresh locks (API + CLAIMS.md)
+  i           sign in: try `gh auth token` exchange, else paste API key / session
+  o           sign out (clears saved ~/.config/chaos/claims-session.toml)
+  L           claim the Overview/Priorities selected function
+  A           claim all functions in every mass-batcher slot
+  y           renew every lock we hold (my claims)
+  x           release every lock we hold
+  Session is required for write; Discord key or GitHub session both work as X-Api-Key.
+  Same contract as the web Chaos Viewer claim buttons.
 
 TOOLS
   j / k       move selection among instrument cards
@@ -1578,6 +1628,330 @@ Press ? or esc to close help."#
         }
         self.id_index = id_index;
         self.module_index = module_index;
+    }
+
+    fn claims_api_base(&self) -> Option<String> {
+        self.db
+            .as_ref()
+            .and_then(|d| d.project.as_ref())
+            .and_then(|p| p.claims_api.as_ref())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn claims_auth_url(&self) -> Option<String> {
+        self.db
+            .as_ref()
+            .and_then(|d| d.project.as_ref())
+            .and_then(|p| p.claims_auth_url.as_ref())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn claims_client(&self) -> Option<ClaimsClient> {
+        self.claims_api_base()
+            .map(|api| ClaimsClient::new(self.client.clone(), &api))
+    }
+
+    fn persist_claims_auth(&self) {
+        if let Some(session) = &self.claims_session {
+            let api = self.claims_api_base();
+            if let Err(e) = save_auth(session, api.as_deref(), &self.my_claims) {
+                // Non-fatal: still usable this session.
+                let _ = e;
+            }
+        }
+    }
+
+    fn claims_session_label(&self) -> String {
+        match &self.claims_session {
+            Some(s) if s.is_ready() => format!("signed in as {}", s.handle),
+            _ => "not signed in".into(),
+        }
+    }
+
+    /// Sign in for claim writes: env already loaded; try gh exchange, else paste.
+    async fn claims_sign_in(&mut self) {
+        let Some(cc) = self.claims_client() else {
+            self.status =
+                "No project.claimsApi — atlas must publish claimsApi (e.g. tangos.dev)".into();
+            return;
+        };
+        // Prefer GitHub CLI token exchange (desktop path from coordinator docs).
+        match session_from_gh_cli(&cc).await {
+            Ok(session) => {
+                self.claims_session = Some(session);
+                self.persist_claims_auth();
+                self.claims_paste_open = false;
+                self.status = format!("Claims signed in via gh · {}", self.claims_session_label());
+                self.error = None;
+                return;
+            }
+            Err(e) => {
+                self.status = format!(
+                    "gh exchange failed ({e:#}) · paste API key (Discord / session) · enter"
+                );
+            }
+        }
+        // Optional: open browser OAuth start (allowlist may reject non-web redirects).
+        if let Some(auth) = self.claims_auth_url() {
+            let _ = open_in_browser(&auth);
+            self.status = "Opened sign-in · if browser finishes, paste session token here · \
+or Discord: DM bot `key` · enter when ready"
+                .into();
+        }
+        self.claims_paste_open = true;
+        self.claims_paste_buf.clear();
+        self.screen = Screen::Claims;
+    }
+
+    fn claims_sign_out(&mut self) {
+        self.claims_session = None;
+        self.my_claims.clear();
+        self.claims_paste_open = false;
+        self.claims_paste_buf.clear();
+        let _ = clear_saved_auth();
+        self.status = "Claims signed out · local session cleared".into();
+        self.error = None;
+    }
+
+    fn apply_claims_paste(&mut self) {
+        let raw = self.claims_paste_buf.trim().to_string();
+        if raw.is_empty() {
+            self.status = "Paste cancelled · empty token".into();
+            self.claims_paste_open = false;
+            return;
+        }
+        // Accept "token" or "token handle" or "token\thandle"
+        let mut parts = raw.split_whitespace();
+        let token = parts.next().unwrap_or("").to_string();
+        let handle = parts
+            .next()
+            .map(str::to_string)
+            .or_else(|| std::env::var("CHAOS_CLAIMS_HANDLE").ok())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                load_saved_auth()
+                    .map(|a| a.handle)
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| "chaos-viewer-user".into());
+        if token.is_empty() {
+            self.status = "Need an API key / session token".into();
+            return;
+        }
+        self.claims_session = Some(ClaimsSession { token, handle });
+        self.persist_claims_auth();
+        self.claims_paste_open = false;
+        self.claims_paste_buf.clear();
+        self.status = format!("Claims key saved · {}", self.claims_session_label());
+        self.error = None;
+    }
+
+    async fn ensure_claims_session(&mut self) -> bool {
+        if self
+            .claims_session
+            .as_ref()
+            .map(|s| s.is_ready())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        // Reload disk/env in case user set env after launch.
+        if let Some(s) = ClaimsSession::load() {
+            self.claims_session = Some(s);
+            return true;
+        }
+        self.claims_sign_in().await;
+        self.claims_session
+            .as_ref()
+            .map(|s| s.is_ready())
+            .unwrap_or(false)
+    }
+
+    async fn claim_functions(&mut self, fns: Vec<ChaosFunction>) {
+        if fns.is_empty() {
+            self.status = "Nothing to claim".into();
+            return;
+        }
+        let Some(api) = self.claims_api_base() else {
+            self.status = "No claimsApi on this project".into();
+            return;
+        };
+        if !self.ensure_claims_session().await {
+            self.status = "Sign in required to claim · i on Claims, or paste key".into();
+            return;
+        }
+        let session = self.claims_session.clone().unwrap();
+        let cc = ClaimsClient::new(self.client.clone(), &api);
+        let mut locked = 0usize;
+        let mut last_err: Option<String> = None;
+        for f in &fns {
+            if f.matched {
+                continue;
+            }
+            if self.locked_by.contains_key(&f.id) {
+                continue;
+            }
+            let end = f.addr.saturating_add(f.size);
+            let note = format!("via chaos-viewer-cli: {}", f.name);
+            match cc
+                .try_lock(&session, &f.module, f.addr, end, Some(&note))
+                .await
+            {
+                Ok(resp) => {
+                    if let Some(id) = resp.claim.as_ref().and_then(|c| c.id.clone()) {
+                        self.my_claims.retain(|c| c.id != id);
+                        self.my_claims.push(MyClaimRecord {
+                            id,
+                            module: f.module.clone(),
+                            start: f.addr,
+                            end,
+                            name: f.name.clone(),
+                        });
+                    }
+                    locked += 1;
+                }
+                Err(e) => {
+                    last_err = Some(format!("{}: {e:#}", f.name));
+                    break;
+                }
+            }
+        }
+        self.persist_claims_auth();
+        if let Some(db) = self.db.clone() {
+            self.refresh_claims(&db).await;
+        }
+        if locked == 0 {
+            self.status = last_err.unwrap_or_else(|| "No functions claimed".into());
+            if self.status.contains("401") || self.status.contains("unauthorized") {
+                self.claims_session = None;
+            }
+        } else if let Some(err) = last_err {
+            self.status = format!("Claimed {locked}, then stopped: {err}");
+            self.error = Some(err);
+        } else {
+            self.status = format!(
+                "Locked {locked} function(s) as {} · y renew · x release",
+                session.handle
+            );
+            self.error = None;
+        }
+    }
+
+    async fn claim_selected_function(&mut self) {
+        let Some(f) = self.selected_function().cloned() else {
+            self.status = "Nothing selected to claim".into();
+            return;
+        };
+        self.claim_functions(vec![f]).await;
+    }
+
+    /// Claim every function across **all** mass-batcher slots (not only active).
+    async fn claim_all_batches(&mut self) {
+        if self.total_batched() == 0 {
+            self.status = "All batches empty · b to add, then A to claim".into();
+            return;
+        }
+        let Some(db) = &self.db else {
+            return;
+        };
+        // Preserve batch order; dedupe if the same id somehow appears twice.
+        let mut seen = HashSet::new();
+        let mut fns: Vec<ChaosFunction> = Vec::new();
+        for slot in &self.batches {
+            for id in slot {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                if let Some(f) = self
+                    .id_index
+                    .get(id)
+                    .and_then(|&i| db.functions.get(i))
+                    .cloned()
+                {
+                    fns.push(f);
+                }
+            }
+        }
+        let n_slots = self.batches.iter().filter(|b| !b.is_empty()).count();
+        if fns.is_empty() {
+            self.status = "No claimable functions in batches".into();
+            return;
+        }
+        self.status = format!(
+            "Claiming {} function(s) across {n_slots} batch(es)…",
+            fns.len()
+        );
+        self.claim_functions(fns).await;
+    }
+
+    async fn renew_my_claims(&mut self) {
+        if self.my_claims.is_empty() {
+            self.status = "No local my-claims to renew · L / A to claim first".into();
+            return;
+        }
+        let Some(api) = self.claims_api_base() else {
+            self.status = "No claimsApi".into();
+            return;
+        };
+        if !self.ensure_claims_session().await {
+            return;
+        }
+        let session = self.claims_session.clone().unwrap();
+        let cc = ClaimsClient::new(self.client.clone(), &api);
+        let mut ok = 0usize;
+        let mut err: Option<String> = None;
+        for c in &self.my_claims {
+            match cc.renew(&session, &c.id).await {
+                Ok(_) => ok += 1,
+                Err(e) => {
+                    err = Some(format!("{}: {e:#}", c.name));
+                    break;
+                }
+            }
+        }
+        if let Some(db) = self.db.clone() {
+            self.refresh_claims(&db).await;
+        }
+        self.status = if let Some(e) = err {
+            format!("Renewed {ok}, then: {e}")
+        } else {
+            format!("Renewed {ok} claim(s) as {}", session.handle)
+        };
+    }
+
+    async fn release_my_claims(&mut self) {
+        if self.my_claims.is_empty() {
+            self.status = "No local my-claims to release".into();
+            return;
+        }
+        let Some(api) = self.claims_api_base() else {
+            self.status = "No claimsApi".into();
+            return;
+        };
+        if !self.ensure_claims_session().await {
+            return;
+        }
+        let session = self.claims_session.clone().unwrap();
+        let cc = ClaimsClient::new(self.client.clone(), &api);
+        let mut keep = Vec::new();
+        let mut released = 0usize;
+        for c in self.my_claims.drain(..) {
+            match cc.release(&session, &c.id).await {
+                Ok(_) => released += 1,
+                Err(_) => keep.push(c),
+            }
+        }
+        self.my_claims = keep;
+        self.persist_claims_auth();
+        if let Some(db) = self.db.clone() {
+            self.refresh_claims(&db).await;
+        }
+        self.status = format!(
+            "Released {released} · {} still held locally",
+            self.my_claims.len()
+        );
     }
 
     async fn refresh_claims(&mut self, db: &ChaosDb) {
@@ -2804,6 +3178,30 @@ chaos projects local-repo <id> /path/to/decomp \
             return;
         }
 
+        // Claims paste modal (API key / session after sign-in)
+        if self.claims_paste_open {
+            match key {
+                KeyCode::Esc => {
+                    self.claims_paste_open = false;
+                    self.claims_paste_buf.clear();
+                    self.status = "Claims paste cancelled".into();
+                }
+                KeyCode::Enter => {
+                    self.apply_claims_paste();
+                }
+                KeyCode::Backspace | KeyCode::Delete => {
+                    self.claims_paste_buf.pop();
+                }
+                KeyCode::Char(_) if !mods.contains(KeyModifiers::CONTROL) => {
+                    if let Some(c) = typed {
+                        self.claims_paste_buf.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.searching {
             match key {
                 KeyCode::Esc => {
@@ -3187,6 +3585,13 @@ chaos projects local-repo <id> /path/to/decomp \
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 self.new_empty_batch().await;
             }
+            // L = claim selected; A = claim active batch (tangos.dev / claimsApi).
+            KeyCode::Char('l') if mods.contains(KeyModifiers::SHIFT) => {
+                self.claim_selected_function().await;
+            }
+            KeyCode::Char('a') if mods.contains(KeyModifiers::SHIFT) => {
+                self.claim_all_batches().await;
+            }
             // Shift+b = clear active batch (plain b toggles selected).
             KeyCode::Char('b') if mods.contains(KeyModifiers::SHIFT) => {
                 self.clear_batch().await;
@@ -3208,6 +3613,19 @@ chaos projects local-repo <id> /path/to/decomp \
                     self.rebuild_priorities();
                     self.status = format!("Claims refreshed · {}", self.claims_status);
                 }
+            }
+            // Claims page write controls (also L/A work globally above).
+            KeyCode::Char('i') if self.screen == Screen::Claims => {
+                self.claims_sign_in().await;
+            }
+            KeyCode::Char('o') if self.screen == Screen::Claims => {
+                self.claims_sign_out();
+            }
+            KeyCode::Char('y') if self.screen == Screen::Claims => {
+                self.renew_my_claims().await;
+            }
+            KeyCode::Char('x') if self.screen == Screen::Claims => {
+                self.release_my_claims().await;
             }
             KeyCode::Char('n') if self.screen == Screen::Priorities => {
                 self.priority_mode = match self.priority_mode {
@@ -4532,28 +4950,101 @@ chaos projects local-repo <id> /path/to/decomp \
 
     fn draw_claims(&self, f: &mut Frame, area: Rect) {
         let bg = self.theme.bg;
-        let block = content_block(" Claims (read-only) ", &self.theme, self.theme.border);
+        let api = self
+            .claims_api_base()
+            .unwrap_or_else(|| "(no claimsApi)".into());
+        let title = if self.claims_paste_open {
+            " Claims  ·  paste API key [/ handle]  ·  enter save · esc cancel "
+        } else {
+            " Claims  ·  live locks + try-lock  ·  i sign-in · L claim · A all batches "
+        };
+        let border = if self
+            .claims_session
+            .as_ref()
+            .map(|s| s.is_ready())
+            .unwrap_or(false)
+        {
+            self.theme.claim
+        } else {
+            self.theme.border
+        };
+        let block = content_block(title, &self.theme, border);
         let inner = block.inner(area);
         f.render_widget(block, area);
         fill_pane(f, inner, &self.theme, bg);
 
         let mut lines = vec![
-            format!("status: {}", self.claims_status),
-            format!("locked functions: {}", self.locked_by.len()),
-            String::new(),
-            "Keys: r refresh · 1-5 screens · ? help · q quit".into(),
+            format!("coordinator: {api}"),
+            format!("session:     {}", self.claims_session_label()),
+            format!("status:      {}", self.claims_status),
+            format!(
+                "locked now:  {} functions · my claims: {}",
+                self.locked_by.len(),
+                self.my_claims.len()
+            ),
             String::new(),
         ];
+        if self.claims_paste_open {
+            lines.push(format!("paste> {}_", self.claims_paste_buf));
+            lines.push(
+                "Discord: DM bot `key` · or GitHub session token · optional second word = handle"
+                    .into(),
+            );
+            lines.push(String::new());
+        } else {
+            lines.push(
+                "Keys: i sign-in · o sign-out · L claim selected · A claim ALL batches · y renew · x release · r refresh"
+                    .into(),
+            );
+            lines.push(String::new());
+        }
+
+        if !self.my_claims.is_empty() {
+            let who = self
+                .claims_session
+                .as_ref()
+                .map(|s| s.handle.as_str())
+                .filter(|h| !h.is_empty())
+                .unwrap_or("you");
+            lines.push(format!(
+                "My claims (this machine · handle {who} · y renew · x release):"
+            ));
+            // Name + module first (human-readable). Claim API id last — only needed
+            // for renew/release, not as the primary label.
+            for c in self.my_claims.iter().take(16) {
+                let label = if c.name.is_empty() {
+                    format!("0x{:x}", c.start)
+                } else {
+                    c.name.clone()
+                };
+                lines.push(format!(
+                    "  {who:16}  {mod_}  {label}  0x{start:x}-0x{end:x}  ({id})",
+                    who = who,
+                    mod_ = c.module,
+                    label = label,
+                    start = c.start,
+                    end = c.end,
+                    id = c.id,
+                ));
+            }
+            if self.my_claims.len() > 16 {
+                lines.push(format!("  … +{} more", self.my_claims.len() - 16));
+            }
+            lines.push(String::new());
+        }
+
+        lines.push("Active locks (sample · who → function id):".into());
         let mut entries: Vec<_> = self.locked_by.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
-        for (id, handle) in entries.into_iter().take(40) {
-            lines.push(format!("{handle:16}  {id}"));
+        for (fn_id, handle) in entries.into_iter().take(24) {
+            lines.push(format!("  {handle:20}  {fn_id}"));
         }
         if self.locked_by.is_empty() {
-            lines.push("No active locks right now.".into());
-            lines.push("Claims are optional: they appear when project.claimsApi is set,".into());
-            lines.push("or when CLAIMS.md on the repo has active rows.".into());
-            lines.push("Empty / placeholder tables are normal and not an error.".into());
+            lines.push("  (none right now)".into());
+            lines.push(
+                "Claims appear when project.claimsApi is set (sm64ds → tangos.dev) or CLAIMS.md has rows."
+                    .into(),
+            );
         }
         f.render_widget(
             Paragraph::new(lines.join("\n")).style(paint_on(self.theme.text, bg)),
@@ -4745,7 +5236,7 @@ pub async fn run(
     branch: Option<String>,
     project: Option<String>,
 ) -> Result<()> {
-    let claims_session = ClaimsSession::from_env();
+    let claims_session = ClaimsSession::load();
     let mut app = App::new(claims_session)?;
 
     if let Some(project) = project {
