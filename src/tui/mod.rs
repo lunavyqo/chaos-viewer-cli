@@ -782,6 +782,10 @@ impl App {
                     key: "S-b",
                     action: "clear batch",
                 },
+                KeyHint {
+                    key: "C-b",
+                    action: "clear all batches",
+                },
             ],
             Screen::Priorities => vec![
                 KeyHint {
@@ -811,6 +815,10 @@ impl App {
                 KeyHint {
                     key: "S-b",
                     action: "clear batch",
+                },
+                KeyHint {
+                    key: "C-b",
+                    action: "clear all batches",
                 },
             ],
             Screen::Prompt => vec![
@@ -877,6 +885,10 @@ impl App {
                 KeyHint {
                     key: "S-b",
                     action: "clear active batch",
+                },
+                KeyHint {
+                    key: "C-b",
+                    action: "clear all batches",
                 },
             ],
             Screen::Claims => vec![
@@ -951,6 +963,7 @@ GLOBAL
   , / .       previous / next batch slot (mass batcher · also < / >)
   + / =       open a new empty batch after the active slot and switch to it
   Shift+b     clear active batch (empty trailing slots are pruned)
+  Ctrl+b      clear ALL mass-batcher slots (back to one empty batch)
               Prompt page uses the active batch only (not the Overview cursor)
               badges: [B3] in a single batch, or [2:3] = batch 2 slot 3 when multi
 
@@ -965,6 +978,7 @@ OVERVIEW
   , / .       switch mass-batcher slot
   + / =       new empty batch
   Shift+b     clear active batch
+  Ctrl+b      clear all batches
 
 PRIORITIES
   n           cycle Nearly / Scaffolded / Biggest / Smallest
@@ -994,6 +1008,7 @@ PROMPT
   g           launch default agent — one window per non-empty batch
   Shift+g     agent picker · enter launch all · d set default · esc close
   Shift+b     clear active batch
+  Ctrl+b      clear all batches
   stock prompts always include provenance / attempt tree (experimental merged)
 
 CLAIMS (page 4 — live locks via project.claimsApi, e.g. https://tangos.dev/api/claims)
@@ -2719,7 +2734,7 @@ Add functions with b on Overview or Priorities \
         }
         if n == 0 {
             self.status = format!(
-                "Active batch {} already empty · ,/. switch · total {} fn",
+                "Active batch {} already empty · ,/. switch · total {} fn · C-b clear all",
                 self.active_batch + 1,
                 self.total_batched()
             );
@@ -2733,9 +2748,25 @@ Add functions with b on Overview or Priorities \
         self.invalidate_detail_lines();
         self.rebuild_prompt().await;
         self.status = format!(
-            "Cleared batch {bi} · removed {n} function(s) · now {}",
+            "Cleared batch {bi} · removed {n} function(s) · now {} · C-b clear all",
             self.batch_summary()
         );
+    }
+
+    /// Wipe every mass-batcher slot (back to a single empty batch).
+    async fn clear_all_batches(&mut self) {
+        let total = self.total_batched();
+        let slots = self.batches.len();
+        if total == 0 && slots <= 1 {
+            self.status = "All batches already empty".into();
+            return;
+        }
+        self.batches = vec![Vec::new()];
+        self.active_batch = 0;
+        self.invalidate_detail_lines();
+        self.rebuild_prompt().await;
+        self.status =
+            format!("Cleared all batches · removed {total} function(s) across {slots} slot(s)");
     }
 
     /// Switch mass-batcher slot (`delta` = ±1). Wraps around.
@@ -3592,7 +3623,10 @@ chaos projects local-repo <id> /path/to/decomp \
             KeyCode::Char('a') if mods.contains(KeyModifiers::SHIFT) => {
                 self.claim_all_batches().await;
             }
-            // Shift+b = clear active batch (plain b toggles selected).
+            // Ctrl+b = clear ALL batches; Shift+b = clear active; plain b toggles.
+            KeyCode::Char('b') if mods.contains(KeyModifiers::CONTROL) => {
+                self.clear_all_batches().await;
+            }
             KeyCode::Char('b') if mods.contains(KeyModifiers::SHIFT) => {
                 self.clear_batch().await;
             }
