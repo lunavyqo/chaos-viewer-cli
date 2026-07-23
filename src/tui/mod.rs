@@ -336,10 +336,6 @@ fn content_block<'a>(
         .style(paint_on(theme.text, theme.bg))
 }
 
-fn key_line(theme: &Theme, hints: &[KeyHint], bg: Color) -> Line<'static> {
-    key_line_fit(theme, hints, bg, u16::MAX)
-}
-
 /// Build a key-hint line that stops before overflowing `max_w` columns.
 /// Remaining hints collapse to a short `…?` so important early keys stay visible.
 fn key_line_fit(theme: &Theme, hints: &[KeyHint], bg: Color, max_w: u16) -> Line<'static> {
